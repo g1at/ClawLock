@@ -15,7 +15,7 @@ Built for both security teams and individual developers — install with one com
 - **75+ detection rules** across 9 scan steps covering config, supply chain, prompt injection, MCP tool poisoning, CVE, credential audit, cost analysis, and more
 - **Built-in MCP deep scan engine** — 28+ patterns across 14 risk categories + Python AST taint tracking, zero external dependency
 - **Built-in OWASP ASI 14 Agent-Scan** — 3-layer detection (config + code patterns + optional LLM assessment)
-- **13 CLI commands** — from full scan to single-skill audit
+- **12 CLI commands** — from full scan to single-skill audit
 - **4 platform adapters** — auto-detects OpenClaw, ZeroClaw, Claude Code, or falls back to generic
 - **Cross-OS support** — runs on Linux, macOS, Windows, and Android (Termux) with zero platform-specific setup
 - **Interactive hardening** with UX impact disclosure — dangerous changes require explicit confirmation
@@ -32,8 +32,8 @@ clawlock precheck ./new-skill/SKILL.md     # Pre-check new skill
 clawlock skill /path/to/skill              # Single skill audit
 clawlock soul                              # SOUL.md + memory drift
 clawlock harden --auto-fix                 # Auto-fix safe items
-clawlock mcp-scan ./mcp-server/src         # MCP Server source code deep scan
-clawlock agent-scan --code ./agent/src     # OWASP ASI 14-category Agent-Scan
+clawlock mcp-scan ./mcp-server/src         # MCP deep scan + dependency manifest CVE checks
+clawlock agent-scan --code ./agent/src     # Agent-Scan + dependency manifest risk checks
 clawlock scan --format html -o report.html # HTML report
 ```
 
@@ -60,10 +60,10 @@ ClawLock is designed with a clear dependency philosophy: **most users need nothi
 Everything below works with just `pip install clawlock` — no Node.js, no external binaries, no API keys:
 
 - Full 9-step scan (config, processes, credentials, supply chain, SOUL.md drift, MCP exposure, CVE, cost)
-- MCP Server source code deep scan (`clawlock mcp-scan`) — built-in Python regex + AST taint tracking engine
-- OWASP ASI 14 Agent-Scan (`clawlock agent-scan --code`) — built-in static config + code pattern analysis
+- MCP Server source code deep scan (`clawlock mcp-scan`) — built-in Python regex + AST taint tracking + package manifest risk checks
+- OWASP ASI 14 Agent-Scan (`clawlock agent-scan --code`) — built-in static config + code pattern + package manifest risk analysis
 - Skill audit, pre-check, hardening, discovery, history, watch mode
-- React2Shell detection
+- React/Next dependency CVE checks are included in code scans
 
 ### Tier 2: LLM-Enhanced (needs API key only)
 
@@ -85,7 +85,7 @@ For security professionals who want maximum coverage, two excellent open-source 
 | **[promptfoo](https://github.com/promptfoo/promptfoo)** | LLM red-team testing: 50+ vulnerability plugins, adaptive jailbreak attacks (tree search, crescendo, multi-turn), OWASP/NIST/MITRE compliance mapping, visual attack dashboard | `npm install -g promptfoo` | Systematic red-team testing of a live agent endpoint with comprehensive attack coverage |
 | **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)** | ReAct agent-driven MCP code analysis (cross-function semantic reasoning, multi-language), 6-sub-agent collaborative Agent-Scan, multi-turn dialogue attack simulation | [Download binary](https://github.com/Tencent/AI-Infra-Guard/releases) | LLM-powered deep semantic analysis of MCP Server source code beyond pattern matching |
 
-**How it works:** When `mcp-scan` or `agent-scan` runs, the built-in engine always executes first. If `ai-infra-guard` is installed AND `--model`/`--token` are provided, ClawLock automatically invokes it as an enhancement layer. Similarly, `clawlock redteam` delegates to `promptfoo` when available. No special flags needed — just install the tools and ClawLock uses them.
+**How it works:** When `mcp-scan` or `agent-scan` runs, the built-in engine always executes first, including local package-manifest dependency checks such as React2Shell. If `ai-infra-guard` is installed AND `--model`/`--token` are provided, ClawLock automatically invokes it as an enhancement layer. Similarly, `clawlock redteam` delegates to `promptfoo` when available. No special flags needed — just install the tools and ClawLock uses them.
 
 ### What's the difference?
 
@@ -137,7 +137,7 @@ clawlock/
 │   ├── mcp_deep.py         # Built-in MCP deep scan engine (28+ patterns + AST)
 │   └── agent_scan.py       # Built-in OWASP ASI 14 engine (3 layers)
 ├── integrations/
-│   ├── __init__.py         # Cloud intel, cost, React2Shell, optional enhancers
+│   ├── __init__.py         # Cloud intel, cost analysis, optional enhancers
 │   └── promptfoo.py        # LLM red-team wrapper (9 plugins × 8 strategies)
 ├── adapters/               # Platform abstraction (4 Claw adapters)
 ├── hardening/              # 10 measures with UX impact disclosure

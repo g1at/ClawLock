@@ -1,5 +1,6 @@
 """
-ClawLock v1.0.1 — Comprehensive security scanner, red-teamer & hardening toolkit
+ClawLock v1.1.0 — Comprehensive security scanner, red-teamer & hardening toolkit
 for Claw-based AI agent deployments.
 """
-__version__ = "1.0.1"
+
+__version__ = "1.1.0"

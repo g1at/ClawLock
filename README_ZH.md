@@ -32,8 +32,8 @@ clawlock precheck ./new-skill/SKILL.md     # 导入新 Skill 前预检
 clawlock skill /path/to/skill              # 审计单个 Skill
 clawlock soul                              # SOUL.md + 记忆文件 Drift 检测
 clawlock harden --auto-fix                 # 交互式加固（自动修复安全项）
-clawlock mcp-scan ./mcp-server/src         # MCP Server 源码深度扫描
-clawlock agent-scan --code ./agent/src     # OWASP ASI 14 类别 Agent 安全扫描
+clawlock mcp-scan ./mcp-server/src         # MCP 源码深度扫描 + 依赖清单 CVE 检查
+clawlock agent-scan --code ./agent/src     # Agent 安全扫描 + 依赖清单风险检查
 clawlock scan --format html -o report.html # 输出 HTML 报告
 ```
 
@@ -60,10 +60,10 @@ ClawLock 的设计理念很明确：**绝大多数用户只需 `pip install claw
 以下所有功能仅需 `pip install clawlock`——不需要 Node.js、不需要外部二进制、不需要 API key：
 
 - 完整 9 步扫描（配置、进程、凭证、供应链、SOUL.md drift、MCP 暴露面、CVE、成本）
-- MCP Server 源码深度扫描（`clawlock mcp-scan`）— 内建 Python 正则 + AST 污点追踪引擎
-- OWASP ASI 14 Agent-Scan（`clawlock agent-scan --code`）— 内建静态配置 + 代码模式分析
+- MCP Server 源码深度扫描（`clawlock mcp-scan`）— 内建 Python 正则 + AST 污点追踪 + 依赖清单风险检查
+- OWASP ASI 14 Agent-Scan（`clawlock agent-scan --code`）— 内建静态配置 + 代码模式 + 依赖清单风险分析
 - Skill 审计、预检、加固、安装发现、扫描历史、持续监控
-- React2Shell 检测
+- React/Next 依赖 CVE 检查已并入代码扫描
 
 ### 第二层：LLM 增强（仅需 API key）
 
@@ -85,7 +85,7 @@ clawlock agent-scan --code ./src --llm           # 叠加 LLM 语义评估层
 | **[promptfoo](https://github.com/promptfoo/promptfoo)** | LLM 红队测试：50+ 漏洞插件，自适应越狱攻击（树搜索、渐进升级、多轮对话），OWASP/NIST/MITRE 合规映射，可视化攻击面板 | `npm install -g promptfoo` | 需要对在线 Agent 端点做系统性红队测试，覆盖全面的攻击手法 |
 | **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)** | ReAct agent 驱动的 MCP 代码分析（跨函数语义推理、多语言支持），6 子 agent 协作 Agent-Scan，多轮对话式攻击模拟 | [下载二进制](https://github.com/Tencent/AI-Infra-Guard/releases) | 需要 LLM 驱动的深度语义分析，超越模式匹配的 MCP Server 代码审计 |
 
-**工作原理：** 运行 `mcp-scan` 或 `agent-scan` 时，内建引擎始终先执行。如果系统中安装了 `ai-infra-guard` 且通过 `--model`/`--token` 提供了 LLM API 凭证，ClawLock 会自动将其作为增强层调用，把结果追加到内建引擎的输出中。`clawlock redteam` 同理，有 `promptfoo` 就用，没有就提示安装。不需要特殊标志——安装工具即可使用。
+**工作原理：** 运行 `mcp-scan` 或 `agent-scan` 时，内建引擎始终先执行，其中也包含本地 `package.json` 依赖清单检查，例如 React2Shell。若系统中安装了 `ai-infra-guard` 且通过 `--model`/`--token` 提供了 LLM API 凭证，ClawLock 会自动将其作为增强层调用，把结果追加到内建引擎的输出中。`clawlock redteam` 同理，有 `promptfoo` 就用，没有就提示安装。不需要特殊标志——安装工具即可使用。
 
 ### 内建引擎 vs 外部工具有什么区别？
 
@@ -139,7 +139,7 @@ clawlock/
 │   ├── mcp_deep.py         # 内建 MCP 深度扫描引擎 (28+ 模式 + AST)
 │   └── agent_scan.py       # 内建 OWASP ASI 14 引擎 (3 层)
 ├── integrations/
-│   ├── __init__.py         # 云端情报、成本分析、React2Shell、可选增强器
+│   ├── __init__.py         # 云端情报、成本分析、可选增强器
 │   └── promptfoo.py        # LLM 红队测试封装（9 插件 × 8 策略）
 ├── adapters/               # 平台适配层（4 个 Claw 适配器）
 ├── hardening/              # 10 项加固措施 + UX 影响声明

@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.0.1"
+    version: "1.1.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -79,7 +79,7 @@ After triggering, classify the request and stay narrow — **do not cross featur
 | Find installations on this machine | **Feature 7: Discovery** | None |
 | Red-team / jailbreak test | **Feature 8: LLM Red-Team** | ⚠️ Requires promptfoo |
 | MCP server security | **Feature 9: MCP Deep Scan** | None (v1.1 built-in engine) |
-| React2Shell / CVE-2025-55182 | **Feature 10: React2Shell** | None |
+| React2Shell / CVE-2025-55182 | **Feature 10: Dependency CVE checks (integrated into code scans)** | None |
 | Multi-agent security scan | **Feature 11: Agent-Scan** | None (v1.1 built-in engine) |
 | View scan history trends | **Feature 12: Scan History** | None |
 | Continuous monitoring | **Feature 13: Watch Mode** | None |
@@ -318,9 +318,8 @@ clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
 clawlock soul --update-baseline    # Update drift baseline
 clawlock discover                  # Discovery (~/.openclaw, ~/.zeroclaw, ~/.claude)
 clawlock redteam URL --deep        # Red-team (9 plugins × 8 strategies) ⚠️ requires promptfoo
-clawlock mcp-scan ./src            # MCP deep code scan (built-in engine, zero external deps)
-clawlock react2shell .             # CVE-2025-55182 (CVSS 10.0)
-clawlock agent-scan --code ./src   # OWASP ASI 14 categories (built-in engine, zero external deps)
+clawlock mcp-scan ./src            # MCP deep code scan (includes dependency CVE checks)
+clawlock agent-scan --code ./src   # OWASP ASI 14 categories (includes dependency CVE checks)
 clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment layer
 ```
 

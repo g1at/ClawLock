@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.0.1"
+    version: "1.1.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -78,7 +78,7 @@ clawlock scan --format html   # HTML 报告
 | 发现系统上的安装 | **Feature 7: 安装发现** | 无 |
 | 红队 / jailbreak 测试 | **Feature 8: LLM 红队测试** | ⚠️ 需 promptfoo |
 | MCP 服务器是否安全 | **Feature 9: MCP 深度扫描** | 无（内建引擎） |
-| React2Shell / CVE-2025-55182 | **Feature 10: React2Shell 扫描** | 无 |
+| React2Shell / CVE-2025-55182 | **Feature 10: 依赖漏洞检查（并入代码扫描）** | 无 |
 | Agent 多智能体安全扫描 | **Feature 11: Agent-Scan** | 无（内建引擎） |
 | 查看扫描历史趋势 | **Feature 12: 扫描历史** | 无 |
 | 持续监控模式 | **Feature 13: 持续监控** | 无 |
@@ -316,9 +316,8 @@ clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
 clawlock soul --update-baseline    # Drift 基准更新
 clawlock discover                  # 安装发现 (~/.openclaw / ~/.zeroclaw / ~/.claude)
 clawlock redteam URL --deep        # 红队 (9 插件 × 8 策略) ⚠️ 需 promptfoo
-clawlock mcp-scan ./src            # MCP 深度代码扫描（内建引擎，零外部依赖）
-clawlock react2shell .             # CVE-2025-55182 (CVSS 10.0)
-clawlock agent-scan --code ./src   # OWASP ASI 14 类别（内建引擎，零外部依赖）
+clawlock mcp-scan ./src            # MCP 深度代码扫描（含依赖漏洞 / React2Shell 检查）
+clawlock agent-scan --code ./src   # OWASP ASI 14 类别（含依赖漏洞 / React2Shell 检查）
 clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 ```
 

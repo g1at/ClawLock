@@ -2,14 +2,19 @@
 ClawLock platform utilities — cross-platform abstraction for
 Windows, macOS, Linux, and Android (Termux).
 """
+
 from __future__ import annotations
-import os, platform, shutil, subprocess, sys, tempfile
+import os
+import platform
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ─── Platform detection ───────────────────────────────────────────────────────
 
-SYSTEM = platform.system().lower()        # "linux", "darwin", "windows", "linux" (android)
+SYSTEM = platform.system().lower()  # "linux", "darwin", "windows", "linux" (android)
 IS_WINDOWS = SYSTEM == "windows"
 IS_MACOS = SYSTEM == "darwin"
 IS_LINUX = SYSTEM == "linux"
@@ -21,13 +26,17 @@ IS_ANDROID = IS_LINUX and (
 
 
 def platform_label() -> str:
-    if IS_ANDROID: return "Android (Termux)"
-    if IS_WINDOWS: return f"Windows {platform.release()}"
-    if IS_MACOS: return f"macOS {platform.mac_ver()[0]}"
+    if IS_ANDROID:
+        return "Android (Termux)"
+    if IS_WINDOWS:
+        return f"Windows {platform.release()}"
+    if IS_MACOS:
+        return f"macOS {platform.mac_ver()[0]}"
     return f"Linux {platform.release()}"
 
 
 # ─── Temp directory (cross-platform) ─────────────────────────────────────────
+
 
 def temp_path(filename: str) -> Path:
     """Return a cross-platform temp file path."""
@@ -36,6 +45,7 @@ def temp_path(filename: str) -> Path:
 
 # ─── Process detection (cross-platform) ──────────────────────────────────────
 
+
 def list_processes() -> List[Dict[str, str]]:
     """Return list of running processes as [{pid, user, cmd}]."""
     procs: List[Dict[str, str]] = []
@@ -43,7 +53,9 @@ def list_processes() -> List[Dict[str, str]]:
         if IS_WINDOWS:
             r = subprocess.run(
                 ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 for line in r.stdout.splitlines():
@@ -53,17 +65,21 @@ def list_processes() -> List[Dict[str, str]]:
         else:
             r = subprocess.run(
                 ["ps", "aux"] if not IS_ANDROID else ["ps", "-e"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 for line in r.stdout.splitlines()[1:]:  # skip header
                     parts = line.split(None, 10)
                     if len(parts) >= 2:
-                        procs.append({
-                            "user": parts[0],
-                            "pid": parts[1],
-                            "cmd": parts[-1] if len(parts) > 2 else parts[1],
-                        })
+                        procs.append(
+                            {
+                                "user": parts[0],
+                                "pid": parts[1],
+                                "cmd": parts[-1] if len(parts) > 2 else parts[1],
+                            }
+                        )
     except Exception:
         pass
     return procs
@@ -76,7 +92,9 @@ def list_listening_ports() -> List[str]:
         if IS_WINDOWS:
             r = subprocess.run(
                 ["netstat", "-ano"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 for line in r.stdout.splitlines():
@@ -85,7 +103,9 @@ def list_listening_ports() -> List[str]:
         elif IS_MACOS:
             r = subprocess.run(
                 ["lsof", "-iTCP", "-sTCP:LISTEN", "-nP"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 for line in r.stdout.splitlines():
@@ -108,6 +128,7 @@ def list_listening_ports() -> List[str]:
 
 # ─── File permission check (cross-platform) ──────────────────────────────────
 
+
 def check_file_permission(path: Path) -> Tuple[bool, bool, str]:
     """
     Check if a file/directory is overly permissive.
@@ -124,6 +145,7 @@ def check_file_permission(path: Path) -> Tuple[bool, bool, str]:
 
 def _check_perm_unix(path: Path) -> Tuple[bool, bool, str]:
     import stat
+
     try:
         mode = path.stat().st_mode
         world_r = bool(mode & stat.S_IROTH)
@@ -138,13 +160,19 @@ def _check_perm_windows(path: Path) -> Tuple[bool, bool, str]:
     try:
         r = subprocess.run(
             ["icacls", str(path)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if r.returncode == 0:
             output = r.stdout.lower()
             # "everyone" or "users" with read access = world-readable
-            world_r = "everyone" in output and ("(r)" in output or "(f)" in output
-                                                or "(rx)" in output or "(oi)" in output)
+            world_r = "everyone" in output and (
+                "(r)" in output
+                or "(f)" in output
+                or "(rx)" in output
+                or "(oi)" in output
+            )
             # "builtin\\users" = group-readable equivalent
             group_r = "users" in output and ("(r)" in output or "(rx)" in output)
             return world_r, group_r, r.stdout.strip()[:100]
@@ -163,14 +191,22 @@ def fix_file_permission(path: Path, private: bool = True) -> bool:
         if IS_WINDOWS:
             # Remove inheritance + remove Everyone/Users
             subprocess.run(
-                ["icacls", str(path), "/inheritance:r",
-                 "/grant:r", f"{os.environ.get('USERNAME', 'User')}:(F)",
-                 "/remove", "Everyone", "/remove", "Users"],
-                capture_output=True, timeout=10,
+                [
+                    "icacls",
+                    str(path),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{os.environ.get('USERNAME', 'User')}:(F)",
+                    "/remove",
+                    "Everyone",
+                    "/remove",
+                    "Users",
+                ],
+                capture_output=True,
+                timeout=10,
             )
             return True
         else:
-            import stat
             if path.is_dir():
                 os.chmod(path, 0o700)
             else:
@@ -181,6 +217,7 @@ def fix_file_permission(path: Path, private: bool = True) -> bool:
 
 
 # ─── Binary discovery (cross-platform) ───────────────────────────────────────
+
 
 def find_binary(name: str) -> Optional[str]:
     """Find a binary in PATH, cross-platform."""
@@ -193,6 +230,7 @@ def find_all_binaries(names: List[str]) -> Dict[str, Optional[str]]:
 
 
 # ─── Android / Termux specifics ─────────────────────────────────────────────
+
 
 def android_home() -> Path:
     """On Android/Termux, home is /data/data/com.termux/files/home."""
@@ -217,13 +255,16 @@ def android_extra_config_paths() -> List[str]:
 
 # ─── Device fingerprint (privacy-preserving) ────────────────────────────────
 
+
 def device_fingerprint() -> str:
     """
     Generate a privacy-preserving device fingerprint.
     SHA-256 of (hostname + OS + username), truncated to 12 hex chars.
     Used for enterprise multi-machine scan tracking and report correlation.
     """
-    import hashlib, getpass
+    import hashlib
+    import getpass
+
     raw = f"{platform.node()}|{platform.system()}|{platform.release()}|{getpass.getuser()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
@@ -232,38 +273,48 @@ def device_fingerprint() -> str:
 
 HISTORY_FILE = Path.home() / ".clawlock" / "scan_history.json"
 
+
 def _load_history() -> list:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     if HISTORY_FILE.exists():
         try:
             import json
+
             return json.loads(HISTORY_FILE.read_text())
         except Exception:
             pass
     return []
 
+
 def _save_history(records: list):
     import json
+
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     # Keep last 100 records
     HISTORY_FILE.write_text(json.dumps(records[-100:], ensure_ascii=False, indent=2))
 
-def record_scan(adapter: str, score: int, critical: int, warning: int, findings_total: int):
+
+def record_scan(
+    adapter: str, score: int, critical: int, warning: int, findings_total: int
+):
     """Append a scan result to persistent history."""
     from datetime import datetime
+
     records = _load_history()
-    records.append({
-        "time": datetime.now().isoformat(),
-        "adapter": adapter,
-        "device": device_fingerprint(),
-        "score": score,
-        "critical": critical,
-        "warning": warning,
-        "total": findings_total,
-    })
+    records.append(
+        {
+            "time": datetime.now().isoformat(),
+            "adapter": adapter,
+            "device": device_fingerprint(),
+            "score": score,
+            "critical": critical,
+            "warning": warning,
+            "total": findings_total,
+        }
+    )
     _save_history(records)
+
 
 def get_scan_history(limit: int = 20) -> list:
     """Return last N scan records."""
     return _load_history()[-limit:]
-
