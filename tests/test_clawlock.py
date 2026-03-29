@@ -1,4 +1,5 @@
-"""ClawLock v1.0.1 test suite 鈥?30 tests."""
+# -*- coding: utf-8 -*-
+"""ClawLock v1.0.1 test suite tests."""
 
 import json
 import os
