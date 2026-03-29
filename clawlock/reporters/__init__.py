@@ -1,4 +1,4 @@
-"""ClawLock v1.0.0 report renderer — Rich terminal + JSON + HTML output."""
+"""ClawLock v1.0.1 report renderer — Rich terminal + JSON + HTML output."""
 from __future__ import annotations
 import json, html as html_mod
 from datetime import datetime
@@ -46,7 +46,7 @@ def render_scan_report(adapter_name, adapter_version, all_findings_map: dict,
     record_scan(adapter_name, score, nc, nw, len(all_f))
 
     if output_format == "json":
-        out = {"tool": "ClawLock", "version": "1.0.0", "time": t,
+        out = {"tool": "ClawLock", "version": "1.0.1", "time": t,
             "adapter": adapter_name, "device": dev_fp, "score": score,
             "findings": [{"scanner": f.scanner, "level": f.level, "title": f.title,
                 "detail": f.detail, "location": f.location, "remediation": f.remediation}
@@ -90,11 +90,11 @@ def render_scan_report(adapter_name, adapter_version, all_findings_map: dict,
         for f in fs[:3]:
             if f.remediation: console.print(f"  [dim]→ {f.remediation}[/dim]")
         console.print()
-    console.print(Panel("[dim]本报告由 ClawLock v1.0.0 生成。静态分析结论仅反映当前可见代码。[/dim]", border_style="dim"))
+    console.print(Panel("[dim]本报告由 ClawLock v1.0.1 生成。静态分析结论仅反映当前可见代码。[/dim]", border_style="dim"))
 
 
 def _render_html(adapter_name, adapter_version, t, score, nc, nw, all_findings_map, output_path):
-    """v1.0.0: Generate standalone HTML report (inspired by ClawLens)."""
+    """v1.0.1: Generate standalone HTML report (inspired by ClawLens)."""
     sc = "#e24b4a" if score < 60 else ("#ef9f27" if score < 80 else "#1d9e75")
     rows = ""
     for label, fs in all_findings_map.items():
@@ -123,7 +123,7 @@ tr:hover{{background:#f9f9f4}}
 <p>安全评分 <span class="score">{score}/100</span> &nbsp; 🔴 高危 {nc} &nbsp; ⚠️ 需关注 {nw}</p>
 <table><thead><tr><th style="width:80px">等级</th><th style="width:120px">检查项</th><th>发现</th><th style="width:200px">建议</th></tr></thead>
 <tbody>{rows}</tbody></table>
-<div class="footer">本报告由 ClawLock v1.0.0 生成 · <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
+<div class="footer">本报告由 ClawLock v1.0.1 生成 · <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
 静态分析结论仅反映当前可见代码，不覆盖运行时风险。</div></body></html>"""
     out = Path(output_path or "clawlock-report.html")
     out.write_text(html_content, encoding="utf-8")

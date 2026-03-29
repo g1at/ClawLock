@@ -1,7 +1,5 @@
 # 🔒 ClawLock
 
-#### [文档](https://github.com/g1at/clawlock#快速开始) | [English](README.md)
-
 [![PyPI](https://img.shields.io/pypi/v/clawlock.svg)](https://pypi.org/project/clawlock/)
 [![License](https://img.shields.io/badge/License-Apache_2.0_OR_MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -16,8 +14,8 @@
 
 - **75+ 条检测规则**，覆盖 9 步扫描：配置审计、供应链、Prompt 注入、MCP 工具投毒、CVE、凭证审计、成本分析等
 - **内建 MCP 深度扫描引擎** — 28+ 模式覆盖 14 个风险类别 + Python AST 污点追踪，零外部依赖
-- **内建 OWASP ASI 14 Agent-Scan** — 4 层检测架构（配置分析 + 代码模式 + 可选 LLM 语义评估 + 可选主动探测）
-- **14 个 CLI 命令** — 从全量扫描到单 Skill 审计到远程实例探测
+- **内建 OWASP ASI 14 Agent-Scan** — 3 层检测架构（配置分析 + 代码模式 + 可选 LLM 语义评估）
+- **13 个 CLI 命令** — 从全量扫描到单 Skill 审计
 - **4 个平台适配器** — 自动识别 OpenClaw / ZeroClaw / Claude Code，或回退到通用模式
 - **全平台兼容** — 在 Linux、macOS、Windows、Android (Termux) 上无需额外配置即可运行
 - **交互式加固** — 影响功能的操作带 UX 影响声明，需要用户明确确认
@@ -30,7 +28,6 @@ pip install clawlock
 
 clawlock scan                              # 全面 9 步安全扫描
 clawlock discover                          # 发现系统上所有 Claw 安装实例
-clawlock probe http://your-server:3000     # 从外部探测远程实例
 clawlock precheck ./new-skill/SKILL.md     # 导入新 Skill 前预检
 clawlock skill /path/to/skill              # 审计单个 Skill
 clawlock soul                              # SOUL.md + 记忆文件 Drift 检测
@@ -66,7 +63,7 @@ ClawLock 的设计理念很明确：**绝大多数用户只需 `pip install claw
 - MCP Server 源码深度扫描（`clawlock mcp-scan`）— 内建 Python 正则 + AST 污点追踪引擎
 - OWASP ASI 14 Agent-Scan（`clawlock agent-scan --code`）— 内建静态配置 + 代码模式分析
 - Skill 审计、预检、加固、安装发现、扫描历史、持续监控
-- 远程实例探测、React2Shell 检测
+- React2Shell 检测
 
 ### 第二层：LLM 增强（仅需 API key）
 
@@ -75,7 +72,6 @@ ClawLock 的设计理念很明确：**绝大多数用户只需 `pip install claw
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 clawlock agent-scan --code ./src --llm           # 叠加 LLM 语义评估层
-clawlock agent-scan http://x:3000 --probe --llm  # 完整 4 层扫描
 ```
 
 不需要任何外部二进制——ClawLock 通过 Python 直接调用 LLM API。
@@ -141,9 +137,9 @@ clawlock/
 ├── scanners/
 │   ├── __init__.py         # 75 条检测规则，覆盖 9 个扫描类别
 │   ├── mcp_deep.py         # 内建 MCP 深度扫描引擎 (28+ 模式 + AST)
-│   └── agent_scan.py       # 内建 OWASP ASI 14 引擎 (4 层)
+│   └── agent_scan.py       # 内建 OWASP ASI 14 引擎 (3 层)
 ├── integrations/
-│   ├── __init__.py         # 云端情报、远程探测、成本分析、React2Shell、可选增强器
+│   ├── __init__.py         # 云端情报、成本分析、React2Shell、可选增强器
 │   └── promptfoo.py        # LLM 红队测试封装（9 插件 × 8 策略）
 ├── adapters/               # 平台适配层（4 个 Claw 适配器）
 ├── hardening/              # 10 项加固措施 + UX 影响声明

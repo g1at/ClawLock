@@ -1,4 +1,4 @@
-"""ClawLock v1.0.0 CLI — 12 commands."""
+"""ClawLock v1.0.1 CLI — 12 commands."""
 from __future__ import annotations
 import asyncio
 from pathlib import Path
@@ -7,14 +7,14 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from . import __version__
-from .adapters import ADAPTERS, get_adapter, get_claw_version, load_config
+from .adapters import ADAPTERS, get_adapter, get_claw_version, load_config, resolve_cve_lookup
 from .hardening import run_hardening
 from .reporters import render_scan_report, console
 from .scanners import (scan_config, scan_all_skills, scan_skill, scan_soul, scan_mcp,
     scan_processes, scan_credential_dirs, scan_memory_files, discover_installations,
-    precheck_skill_md, CRIT, HIGH)
+    precheck_skill_md, CRIT, HIGH, INFO, Finding)
 
-app = typer.Typer(name="clawlock", help="🔒 ClawLock v1.0.0 — Claw 平台综合安全扫描与加固工具",
+app = typer.Typer(name="clawlock", help="🔒 ClawLock v1.0.1 — Claw 平台综合安全扫描与加固工具",
     rich_markup_mode="rich", no_args_is_help=True)
 A = Annotated[str, typer.Option("--adapter", "-a", help="适配器 [auto|openclaw|zeroclaw|claude-code|generic]")]
 F = Annotated[str, typer.Option("--format", "-f", help="输出格式 [text|json|html]")]
@@ -64,7 +64,11 @@ def scan(adapter: A = "auto",
     if not no_cve:
         _step(7, total, "CVE 漏洞匹配")
         from .integrations import lookup_cve
-        cve_f = asyncio.run(lookup_cve("OpenClaw", ver))
+        cve_target, skip_reason = resolve_cve_lookup(spec, ver)
+        if cve_target:
+            cve_f = asyncio.run(lookup_cve(cve_target.product, cve_target.version))
+        else:
+            cve_f = [Finding("cve", INFO, "已跳过在线 CVE 匹配", skip_reason)]
     findings_map["CVE 漏洞"] = cve_f
 
     _step(8, total, "成本分析")
@@ -94,21 +98,6 @@ def discover():
     for f in findings:
         console.print(f"  {f.emoji} [bold]{f.title}[/bold]")
         if f.detail: console.print(f"     [dim]{f.detail}[/dim]")
-
-
-@app.command()
-def probe(url: Annotated[str, typer.Argument(help="目标 Claw 实例 URL (如 http://your-server:3000)")]):
-    """🌐 从外部探测 Claw 实例安全状态（TLS/认证/Header/端点暴露/提示词泄露）"""
-    from .integrations import probe_remote_instance
-    console.print(f"[cyan]🌐 远程探测[/cyan]  target={url}")
-    findings = probe_remote_instance(url)
-    for f in findings:
-        icon = "🔴" if f.level in (CRIT, HIGH) else ("⚠️ " if f.level == WARN else "ℹ️ ")
-        console.print(f"  {icon} [bold]{f.title}[/bold]")
-        console.print(f"     [dim]{f.detail}[/dim]")
-        if f.remediation: console.print(f"     → {f.remediation}")
-    if any(f.level in (CRIT, HIGH) for f in findings):
-        raise typer.Exit(1)
 
 
 @app.command()
@@ -228,21 +217,18 @@ def mcp_scan(code_path: Annotated[str, typer.Argument(help="MCP Server 源代码
 
 @app.command(name="agent-scan")
 def agent_scan(
-    target: Annotated[Optional[str], typer.Argument(help="目标 agent URL (可选, 用于主动探测)")] = None,
     code: Annotated[Optional[str], typer.Option("--code", help="Agent 源码路径 (用于代码扫描)")] = None,
     config_file: Annotated[Optional[str], typer.Option("--config", help="Agent 配置文件路径")] = None,
     model: Annotated[str, typer.Option("--model")] = "",
     token: Annotated[str, typer.Option("--token", envvar="ANTHROPIC_API_KEY")] = "",
     base_url: Annotated[str, typer.Option("--base-url")] = "",
     llm: Annotated[bool, typer.Option("--llm/--no-llm", help="启用 LLM 辅助语义分析")] = False,
-    probe: Annotated[bool, typer.Option("--probe/--no-probe", help="启用主动探测 (向目标发请求)")] = False,
     adapter: A = "auto"):
-    """OWASP ASI 14 类别 Agent 安全扫描 (4 层检测架构)
+    """OWASP ASI 14 类别 Agent 安全扫描 (3 层检测架构)
 
     Layer 1: 静态配置分析 (零成本, 自动运行)
     Layer 2: 代码模式检测 (零成本, 需 --code)
     Layer 3: LLM 语义评估 (需 --llm + API key)
-    Layer 4: 主动探测 (需 --probe + 目标 URL)
     """
     from .integrations import run_agent_scan
     from .adapters import get_adapter, load_config
@@ -260,15 +246,12 @@ def agent_scan(
     if config: layers.append("配置分析")
     if code: layers.append("代码扫描")
     if llm: layers.append("LLM 评估")
-    if probe and target: layers.append("主动探测")
     console.print(f"[cyan]🤖 Agent-Scan (OWASP ASI 14)[/cyan]")
     console.print(f"  检测层: {' + '.join(layers) if layers else '配置分析'}")
-    if target: console.print(f"  目标: {target}")
 
     findings = run_agent_scan(
-        target_url=target or "", model=model, token=token, base_url=base_url,
-        config=config, code_path=Path(code).expanduser() if code else None,
-        enable_llm=llm, enable_probe=probe)
+        model=model, token=token, base_url=base_url, config=config,
+        code_path=Path(code).expanduser() if code else None, enable_llm=llm)
 
     for f in findings:
         console.print(f"  {f.emoji} [bold]{f.title}[/bold]")

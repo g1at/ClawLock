@@ -1,4 +1,4 @@
-"""ClawLock v1.0.0 test suite — 30 tests."""
+"""ClawLock v1.0.1 test suite — 30 tests."""
 import json, os, stat
 from pathlib import Path
 import pytest
@@ -18,6 +18,73 @@ class TestAdapters:
     def test_has_credential_dirs(self):
         from clawlock.adapters import get_adapter
         assert len(get_adapter("openclaw").credential_dirs) > 0
+
+class TestCveLookup:
+    def _stub_scan_pipeline(self, monkeypatch, cli, captured):
+        import clawlock.integrations as integrations
+
+        monkeypatch.setattr(cli, "scan_config", lambda spec: ([], None))
+        monkeypatch.setattr(cli, "scan_processes", lambda spec: [])
+        monkeypatch.setattr(cli, "scan_credential_dirs", lambda spec: [])
+        monkeypatch.setattr(cli, "scan_all_skills", lambda spec, extra_dir=None: ([], 0))
+        monkeypatch.setattr(cli, "scan_soul", lambda spec, soul_path=None: ([], None))
+        monkeypatch.setattr(cli, "scan_memory_files", lambda spec: [])
+        monkeypatch.setattr(cli, "scan_mcp", lambda spec, extra_mcp=None: [])
+        monkeypatch.setattr(cli, "render_scan_report",
+            lambda adapter_name, adapter_version, findings_map, output_format, output:
+                captured.update({"findings_map": findings_map}))
+        monkeypatch.setattr(integrations, "analyze_cost", lambda config, cfg_path="": [])
+
+    def test_resolve_cve_lookup_skips_generic_adapter(self):
+        import clawlock.adapters as adapters
+        target, reason = adapters.resolve_cve_lookup(adapters.get_adapter("generic"), "unknown")
+        assert target is None
+        assert "跳过" in reason
+
+    def test_resolve_cve_lookup_normalizes_version(self, monkeypatch):
+        import clawlock.adapters as adapters
+        monkeypatch.setattr(adapters.shutil, "which", lambda name: "C:/fake/openclaw.exe")
+        target, reason = adapters.resolve_cve_lookup(adapters.get_adapter("openclaw"), "OpenClaw v1.2.3")
+        assert target is not None
+        assert target.product == "OpenClaw"
+        assert target.version == "1.2.3"
+        assert reason == ""
+
+    def test_scan_skips_cve_lookup_without_installation(self, monkeypatch):
+        import clawlock.__main__ as cli
+        import clawlock.integrations as integrations
+
+        captured = {}
+        self._stub_scan_pipeline(monkeypatch, cli, captured)
+
+        async def _unexpected_lookup(*args, **kwargs):
+            raise AssertionError("lookup_cve should not run when no supported installation is present")
+
+        monkeypatch.setattr(integrations, "lookup_cve", _unexpected_lookup)
+        cli.scan(adapter="generic", no_cve=False, no_redteam=True, output_format="json")
+
+        all_findings = [f for fs in captured["findings_map"].values() for f in fs]
+        assert any(f.scanner == "cve" and f.level == INFO and "跳过" in f.title for f in all_findings)
+
+    def test_scan_uses_resolved_cve_target(self, monkeypatch):
+        import clawlock.__main__ as cli
+        import clawlock.integrations as integrations
+        from clawlock.adapters import CveLookupTarget
+
+        captured = {}
+        self._stub_scan_pipeline(monkeypatch, cli, captured)
+        monkeypatch.setattr(cli, "resolve_cve_lookup",
+            lambda spec, version: (CveLookupTarget("ZeroClaw", "2.4.6"), ""))
+
+        calls = []
+        async def _fake_lookup(product, version):
+            calls.append((product, version))
+            return []
+
+        monkeypatch.setattr(integrations, "lookup_cve", _fake_lookup)
+        cli.scan(adapter="generic", no_cve=False, no_redteam=True, output_format="json")
+
+        assert calls == [("ZeroClaw", "2.4.6")]
 
 class TestConfigScanner:
     def test_no_auth(self, tmp_path):

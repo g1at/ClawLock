@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.0.0"
+    version: "1.0.1"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -39,7 +39,6 @@ metadata:
 pip install clawlock          # 安装
 clawlock scan                 # 全面 9 步扫描
 clawlock discover             # 发现所有安装实例
-clawlock probe http://x:3000  # 远程外部探测
 clawlock precheck ./SKILL.md  # 新 skill 导入预检
 clawlock harden --auto-fix    # 加固（自动修复安全项）
 clawlock scan --format html   # HTML 报告
@@ -315,14 +314,12 @@ clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
 
 ```bash
 clawlock soul --update-baseline    # Drift 基准更新
-clawlock probe http://server:3000  # 远程探测 (TLS/认证/Header/端点/提示词泄露)
 clawlock discover                  # 安装发现 (~/.openclaw / ~/.zeroclaw / ~/.claude)
 clawlock redteam URL --deep        # 红队 (9 插件 × 8 策略) ⚠️ 需 promptfoo
 clawlock mcp-scan ./src            # MCP 深度代码扫描（内建引擎，零外部依赖）
 clawlock react2shell .             # CVE-2025-55182 (CVSS 10.0)
 clawlock agent-scan --code ./src   # OWASP ASI 14 类别（内建引擎，零外部依赖）
 clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
-clawlock agent-scan http://x:3000 --probe        # 追加主动探测层
 ```
 
 > **依赖说明：** 除 `clawlock redteam` 需要 promptfoo (Node.js) 外，所有其他命令仅需 `pip install clawlock`，零外部二进制依赖。

@@ -5,12 +5,12 @@ description: >
   Trigger when the user explicitly requests a security scan, health check,
   hardening, or skill audit:
   "security scan" "health check" "check skill safety" "harden my claw"
-  "probe instance" "drift detection" "red team test" "React2Shell"
+  "drift detection" "red team test" "React2Shell"
   "agent-scan" "discover installations" "credential audit" "cost analysis"
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.0.0"
+    version: "1.0.1"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -41,7 +41,6 @@ Runs on Linux · macOS · Windows · Android (Termux).
 pip install clawlock          # Install
 clawlock scan                 # Full 9-step scan
 clawlock discover             # Find all installations
-clawlock probe http://x:3000  # Remote probe
 clawlock precheck ./SKILL.md  # Pre-check new skill
 clawlock harden --auto-fix    # Harden (auto-fix safe items)
 clawlock scan --format html   # HTML report
@@ -77,7 +76,6 @@ After triggering, classify the request and stay narrow — **do not cross featur
 | Check new skill before importing | **Feature 3: Skill Import Pre-check** | None |
 | Harden / tighten config | **Feature 4: Hardening Wizard** | None |
 | SOUL.md / memory file drift | **Feature 5: Drift Detection** | None |
-| Probe remote instance | **Feature 6: Remote Probe** | None |
 | Find installations on this machine | **Feature 7: Discovery** | None |
 | Red-team / jailbreak test | **Feature 8: LLM Red-Team** | ⚠️ Requires promptfoo |
 | MCP server security | **Feature 9: MCP Deep Scan** | None (v1.1 built-in engine) |
@@ -318,14 +316,12 @@ clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
 
 ```bash
 clawlock soul --update-baseline    # Update drift baseline
-clawlock probe http://server:3000  # Remote probe (TLS/auth/headers/endpoints/prompt leakage)
 clawlock discover                  # Discovery (~/.openclaw, ~/.zeroclaw, ~/.claude)
 clawlock redteam URL --deep        # Red-team (9 plugins × 8 strategies) ⚠️ requires promptfoo
 clawlock mcp-scan ./src            # MCP deep code scan (built-in engine, zero external deps)
 clawlock react2shell .             # CVE-2025-55182 (CVSS 10.0)
 clawlock agent-scan --code ./src   # OWASP ASI 14 categories (built-in engine, zero external deps)
 clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment layer
-clawlock agent-scan http://x:3000 --probe        # Add active probing layer
 ```
 
 > **Dependency note:** All commands except `clawlock redteam` require only `pip install clawlock` — zero external binaries needed.

@@ -1,7 +1,5 @@
 # 🔒 ClawLock
 
-#### [Documentation](https://github.com/g1at/clawlock#quick-start) | [中文](README_ZH.md)
-
 [![PyPI](https://img.shields.io/pypi/v/clawlock.svg)](https://pypi.org/project/clawlock/)
 [![License](https://img.shields.io/badge/License-Apache_2.0_OR_MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -16,8 +14,8 @@ Built for both security teams and individual developers — install with one com
 
 - **75+ detection rules** across 9 scan steps covering config, supply chain, prompt injection, MCP tool poisoning, CVE, credential audit, cost analysis, and more
 - **Built-in MCP deep scan engine** — 28+ patterns across 14 risk categories + Python AST taint tracking, zero external dependency
-- **Built-in OWASP ASI 14 Agent-Scan** — 4-layer detection (config + code patterns + optional LLM assessment + optional active probing)
-- **14 CLI commands** — from full scan to single-skill audit to remote instance probing
+- **Built-in OWASP ASI 14 Agent-Scan** — 3-layer detection (config + code patterns + optional LLM assessment)
+- **13 CLI commands** — from full scan to single-skill audit
 - **4 platform adapters** — auto-detects OpenClaw, ZeroClaw, Claude Code, or falls back to generic
 - **Cross-OS support** — runs on Linux, macOS, Windows, and Android (Termux) with zero platform-specific setup
 - **Interactive hardening** with UX impact disclosure — dangerous changes require explicit confirmation
@@ -30,7 +28,6 @@ pip install clawlock
 
 clawlock scan                              # Full 9-step security scan
 clawlock discover                          # Find all Claw installations
-clawlock probe http://your-server:3000     # Remote instance probe
 clawlock precheck ./new-skill/SKILL.md     # Pre-check new skill
 clawlock skill /path/to/skill              # Single skill audit
 clawlock soul                              # SOUL.md + memory drift
@@ -66,7 +63,7 @@ Everything below works with just `pip install clawlock` — no Node.js, no exter
 - MCP Server source code deep scan (`clawlock mcp-scan`) — built-in Python regex + AST taint tracking engine
 - OWASP ASI 14 Agent-Scan (`clawlock agent-scan --code`) — built-in static config + code pattern analysis
 - Skill audit, pre-check, hardening, discovery, history, watch mode
-- Remote instance probing, React2Shell detection
+- React2Shell detection
 
 ### Tier 2: LLM-Enhanced (needs API key only)
 
@@ -75,7 +72,6 @@ With an Anthropic or OpenAI API key, unlock semantic-level analysis on top of th
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment layer
-clawlock agent-scan http://x:3000 --probe --llm  # Full 4-layer scan
 ```
 
 No external binary needed — ClawLock calls the LLM API directly via Python.
@@ -139,15 +135,15 @@ clawlock/
 ├── scanners/
 │   ├── __init__.py         # 75 detection rules across 9 scan categories
 │   ├── mcp_deep.py         # Built-in MCP deep scan engine (28+ patterns + AST)
-│   └── agent_scan.py       # Built-in OWASP ASI 14 engine (4 layers)
+│   └── agent_scan.py       # Built-in OWASP ASI 14 engine (3 layers)
 ├── integrations/
-│   ├── __init__.py         # Cloud intel, remote probe, cost, React2Shell, optional enhancers
+│   ├── __init__.py         # Cloud intel, cost, React2Shell, optional enhancers
 │   └── promptfoo.py        # LLM red-team wrapper (9 plugins × 8 strategies)
 ├── adapters/               # Platform abstraction (4 Claw adapters)
 ├── hardening/              # 10 measures with UX impact disclosure
 ├── reporters/              # Rich terminal + JSON + HTML
 ├── utils/                  # Cross-platform abstraction (Windows/Mac/Linux/Android)
-└── __main__.py             # Typer CLI (14 commands)
+└── __main__.py             # Typer CLI (13 commands)
 ```
 
 ## CI/CD Integration

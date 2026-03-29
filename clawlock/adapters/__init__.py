@@ -3,7 +3,7 @@ Adapter layer — detects and abstracts ZeroClaw, OpenClaw, Claude Code,
 and generic Claw products. added memory_files, credential_dirs.
 """
 from __future__ import annotations
-import json, shutil, subprocess
+import json, re, shutil, subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +21,12 @@ class AdapterSpec:
     memory_files: List[str] = field(default_factory=list)       
     credential_dirs: List[str] = field(default_factory=list)  
     process_names: List[str] = field(default_factory=list)     
+
+
+@dataclass(frozen=True)
+class CveLookupTarget:
+    product: str
+    version: str
 
 ADAPTERS: Dict[str, AdapterSpec] = {
     "openclaw": AdapterSpec("openclaw", "OpenClaw", "openclaw",
@@ -59,6 +65,13 @@ ADAPTERS: Dict[str, AdapterSpec] = {
     ),
 }
 
+_CVE_PRODUCT_NAMES: Dict[str, str] = {
+    "openclaw": "OpenClaw",
+    "zeroclaw": "ZeroClaw",
+    "claude-code": "Claude Code",
+}
+_UNKNOWN_VERSION_MARKERS = {"", "unknown", "n/a", "none", "not installed"}
+
 
 def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
     try:
@@ -83,6 +96,33 @@ def get_claw_version(adapter: AdapterSpec) -> str:
     if not adapter.version_cmd: return "unknown"
     _, out, _ = run_cmd(adapter.version_cmd)
     return out.splitlines()[0] if out else "unknown"
+
+
+def _normalize_version(version: str) -> Optional[str]:
+    raw = (version or "").strip()
+    if not raw or raw.lower() in _UNKNOWN_VERSION_MARKERS:
+        return None
+    match = re.search(r"\d+(?:\.\d+){0,3}(?:[-+._A-Za-z0-9]+)?", raw)
+    return match.group(0) if match else None
+
+
+def _adapter_has_installation(adapter: AdapterSpec) -> bool:
+    if adapter.bin and shutil.which(adapter.bin):
+        return True
+    paths = adapter.config_paths + adapter.credential_dirs
+    return any(Path(p).expanduser().exists() for p in paths)
+
+
+def resolve_cve_lookup(adapter: AdapterSpec, version: str) -> Tuple[Optional[CveLookupTarget], str]:
+    product = _CVE_PRODUCT_NAMES.get(adapter.name)
+    if not product:
+        return None, "未识别到受支持的 Claw 产品，已跳过在线 CVE 匹配。"
+    if not _adapter_has_installation(adapter):
+        return None, "未发现已安装的 Claw 产品，已跳过在线 CVE 匹配。"
+    normalized_version = _normalize_version(version)
+    if not normalized_version:
+        return None, f"未能识别 {product} 的版本号，已跳过在线 CVE 匹配。"
+    return CveLookupTarget(product=product, version=normalized_version), ""
 
 
 def load_config(adapter: AdapterSpec) -> Tuple[Dict[str, Any], Optional[str]]:
