@@ -434,6 +434,50 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# Shell command deobfuscation — recursively unwrap nested shell invocations
+# so that pattern matching works on the *actual* payload.
+# ---------------------------------------------------------------------------
+
+# Matches: sh -c "...", bash -c '...', /bin/sh -c "...", cmd /c "...", etc.
+_SHELL_WRAP_RE = re.compile(
+    r"""(?:(?:/usr)?(?:/bin/)?(?:ba)?sh|dash|zsh|ksh)\s+-c\s+"""  # Unix shells
+    r"""|cmd(?:\.exe)?\s+/[cC]\s+"""                              # Windows cmd
+    r"""|powershell(?:\.exe)?\s+-(?:Command|c)\s+""",             # PowerShell
+    re.VERBOSE,
+)
+
+# Matches the quoted payload after the shell -c invocation.
+# Group 1: double-quoted, Group 2: single-quoted, Group 3: rest of line (unquoted).
+_QUOTED_PAYLOAD_RE = re.compile(
+    r"""(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(.+))""",
+)
+
+
+def _unwrap_shell_commands(line: str, *, _depth: int = 0) -> List[str]:
+    """Return a list of unwrapped inner commands from nested shell invocations.
+
+    Given ``bash -c "sh -c 'rm -rf /'"`` returns ``['rm -rf /']`` (plus
+    intermediate layers).  Max recursion depth is 5 to prevent pathological
+    inputs from looping.
+    """
+    if _depth > 5:
+        return []
+    results: List[str] = []
+    for m in _SHELL_WRAP_RE.finditer(line):
+        rest = line[m.end():]
+        pm = _QUOTED_PAYLOAD_RE.match(rest)
+        if pm:
+            payload = pm.group(1) or pm.group(2) or pm.group(3) or ""
+            # Unescape basic sequences
+            payload = payload.replace('\\"', '"').replace("\\'", "'")
+            if payload:
+                results.append(payload)
+                # Recurse to handle deeper nesting
+                results.extend(_unwrap_shell_commands(payload, _depth=_depth + 1))
+    return results
+
+
 MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     (
         "curl\\b[^|&;#\\n]*\\$\\{?(?:HOME|TOKEN|API_KEY|SECRET|PASSWORD|CREDENTIAL|ANTHROPIC_API_KEY|OPENAI_API_KEY)\\}?",
@@ -730,21 +774,58 @@ def scan_skill(skill_path: Path) -> List[Finding]:
         except Exception:
             continue
         for i, line in enumerate(content.splitlines(), 1):
-            for pattern, level, title, detail in MALICIOUS_PATTERNS:
-                if re.search(pattern, line):
-                    key = f"{pattern}:{f}:{i}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
+            # Build candidate lines: original + any unwrapped shell payloads
+            candidates = [line]
+            unwrapped = _unwrap_shell_commands(line)
+            candidates.extend(unwrapped)
+            is_deobfuscated = False
+            for candidate in candidates:
+                for pattern, level, title, detail in MALICIOUS_PATTERNS:
+                    if re.search(pattern, candidate):
+                        key = f"{pattern}:{f}:{i}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        suffix = " (反混淆后发现)" if candidate is not line else ""
+                        findings.append(
+                            Finding(
+                                "skill",
+                                level,
+                                f"[{skill_name}] {title}{suffix}",
+                                detail,
+                                f"{f.name}:{i}",
+                                line.strip()[:120],
+                                metadata={
+                                    "skill": skill_name,
+                                    "file": str(f),
+                                    "line": i,
+                                    "deobfuscated": candidate is not line,
+                                },
+                            )
+                        )
+                        if candidate is not line:
+                            is_deobfuscated = True
+            # If shell wrapping was detected and inner payloads were found,
+            # emit an additional info-level finding about the obfuscation.
+            if unwrapped and is_deobfuscated:
+                ob_key = f"__obfuscation__:{f}:{i}"
+                if ob_key not in seen:
+                    seen.add(ob_key)
                     findings.append(
                         Finding(
                             "skill",
-                            level,
-                            f"[{skill_name}] {title}",
-                            detail,
+                            WARN,
+                            f"[{skill_name}] Shell 命令嵌套混淆",
+                            f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
                             f"{f.name}:{i}",
                             line.strip()[:120],
-                            metadata={"skill": skill_name, "file": str(f), "line": i},
+                            remediation="审查解包后的实际命令。",
+                            metadata={
+                                "skill": skill_name,
+                                "file": str(f),
+                                "line": i,
+                                "unwrapped_commands": unwrapped,
+                            },
                         )
                     )
     return findings
@@ -1051,20 +1132,24 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         else skill_md_path.stem
     )
     for i, line in enumerate(content.splitlines(), 1):
-        for pattern, level, title, detail in MALICIOUS_PATTERNS:
-            if re.search(pattern, line):
-                findings.append(
-                    Finding(
-                        "skill_precheck",
-                        level,
-                        f"[新 Skill: {skill_name}] {title}",
-                        detail,
-                        f"SKILL.md:{i}",
-                        line.strip()[:120],
-                        "安装前仔细审查来源和代码。",
+        candidates = [line]
+        candidates.extend(_unwrap_shell_commands(line))
+        for candidate in candidates:
+            for pattern, level, title, detail in MALICIOUS_PATTERNS:
+                if re.search(pattern, candidate):
+                    suffix = " (反混淆后发现)" if candidate is not line else ""
+                    findings.append(
+                        Finding(
+                            "skill_precheck",
+                            level,
+                            f"[新 Skill: {skill_name}] {title}{suffix}",
+                            detail,
+                            f"SKILL.md:{i}",
+                            line.strip()[:120],
+                            "安装前仔细审查来源和代码。",
+                        )
                     )
-                )
-                break
+                    break
     for pat, lv, title, detail in [
         (
             "(?i)requires.*(?:sudo|root|admin)",
