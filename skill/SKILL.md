@@ -18,7 +18,7 @@ metadata:
       python: ">=3.9"
       pip_package: "clawlock"
       bins_optional:
-        - promptfoo  # 仅 Feature 8 红队测试需要，其余功能完全零外部依赖
+        - promptfoo  # 仅 Feature 7 红队测试需要，其余功能完全零外部依赖
     note: >
       MCP 深度扫描和 Agent-Scan 已内建引擎，不再需要 ai-infra-guard 二进制。
       如果系统中已安装 ai-infra-guard，会自动作为可选增强使用。
@@ -74,14 +74,13 @@ clawlock scan --format html   # HTML 报告
 | 导入新 skill 前检查 | **Feature 3: Skill 导入预检** | 无 |
 | 加固 / 收紧配置 | **Feature 4: 安全加固向导** | 无 |
 | SOUL.md / Memory 文件 drift | **Feature 5: Drift 检测** | 无 |
-| 远程探测实例安全状态 | **Feature 6: 远程探测** | 无 |
-| 发现系统上的安装 | **Feature 7: 安装发现** | 无 |
-| 红队 / jailbreak 测试 | **Feature 8: LLM 红队测试** | ⚠️ 需 promptfoo |
-| MCP 服务器是否安全 | **Feature 9: MCP 深度扫描** | 无（内建引擎） |
-| React2Shell / CVE-2025-55182 | **Feature 10: 依赖漏洞检查（并入代码扫描）** | 无 |
-| Agent 多智能体安全扫描 | **Feature 11: Agent-Scan** | 无（内建引擎） |
-| 查看扫描历史趋势 | **Feature 12: 扫描历史** | 无 |
-| 持续监控模式 | **Feature 13: 持续监控** | 无 |
+| 发现系统上的安装 | **Feature 6: 安装发现** | 无 |
+| 红队 / jailbreak 测试 | **Feature 7: LLM 红队测试** | ⚠️ 需 promptfoo |
+| MCP 服务器是否安全 | **Feature 8: MCP 深度扫描** | 无（内建引擎） |
+| React2Shell / CVE-2025-55182 | **Feature 9: 依赖漏洞检查（并入代码扫描）** | 无 |
+| Agent 多智能体安全扫描 | **Feature 10: Agent-Scan** | 无（内建引擎） |
+| 查看扫描历史趋势 | **Feature 11: 扫描历史** | 无 |
+| 持续监控模式 | **Feature 12: 持续监控** | 无 |
 
 不要将普通的 Claw 使用、项目调试、依赖安装当作触发本 skill 的理由。
 
@@ -89,7 +88,7 @@ clawlock scan --format html   # HTML 报告
 
 ## 扫描启动提示
 
-在开始任何扫描（Feature 1–11）前，必须先输出一行启动提示：
+在开始任何扫描（Feature 1–10）前，必须先输出一行启动提示：
 
 ```
 🔍 ClawLock 正在检测 {目标} 安全性，请稍候...
@@ -167,7 +166,7 @@ clawlock scan --no-cve                           # 离线模式
 
 #### 4.2 本地静态分析（46 模式）
 
-🔴 高危（确认恶意）：凭证外传(curl/wget) · 反弹Shell(bash/nc/Python/mkfifo) · 挖矿 · 批量删除 · chmod 777 · 提示词注入(覆盖/劫持/越狱/中文) · 混淆载荷(base64→shell) · 零宽字符
+🔴 高危（确认恶意）：凭证外传(curl/wget) · 反弹Shell(bash/nc/Python/mkfifo) · 挖矿 · 批量删除 · chmod 777 · 提示词注入(覆盖/劫持/越狱/中文) · 混淆载荷(base64→shell) · 零宽字符 · Shell 命令嵌套混淆（`sh -c`/`bash -c`/`cmd /c` 多层包装绕过检测）
 
 🔴 高信号：Unicode 转义混淆 · 硬编码凭证 · AI API 密钥 · 危险环境变量export · Cron持久化 · DNS外传 · 用户输入直接进eval · 递归删除系统目录
 
@@ -276,12 +275,13 @@ clawlock skill /path/to/SKILL.md --no-cloud
 clawlock precheck ./new-skill/SKILL.md
 ```
 
-5 维度检测：
+6 维度检测：
 1. **Prompt 注入** — 46 个恶意模式匹配（含中文）
-2. **敏感权限声明** — sudo/root/全盘访问/危险环境变量
-3. **可疑 URL** — .xyz/.tk/.ml 等高风险 TLD
-4. **隐藏内容** — 零宽字符 (Unicode smuggling)
-5. **异常体积** — 文件大小超过 50KB
+2. **Shell 反混淆** — 递归解包 `sh -c`/`bash -c`/`cmd /c` 嵌套后再匹配
+3. **敏感权限声明** — sudo/root/全盘访问/危险环境变量
+4. **可疑 URL** — .xyz/.tk/.ml 等高风险 TLD
+5. **隐藏内容** — 零宽字符 (Unicode smuggling)
+6. **异常体积** — 文件大小超过 50KB
 
 ---
 
@@ -310,7 +310,7 @@ clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
 
 ---
 
-## Feature 5–11: 其他功能
+## Feature 5–10: 其他功能
 
 ```bash
 clawlock soul --update-baseline    # Drift 基准更新
@@ -328,7 +328,7 @@ clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 
 ## 全量报告输出规范
 
-**以下规范仅适用于 Feature 1 全量扫描**，不用于 Feature 2–11 的单项回答。
+**以下规范仅适用于 Feature 1 全量扫描**，不用于 Feature 2–10 的单项回答。
 
 ### 严格输出边界
 
@@ -344,7 +344,7 @@ clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 
 📅 {日期时间}
 🖥️ {适配器} {版本} · {操作系统}
-📦 安全评分 {score}/100 · {1 句主要风险说明}
+📦 安全评分 {score}/100 · 等级 {S/A/B/C/D} · {1 句主要风险说明}
 
 | 检查项 | 状态 | 详情 |
 |--------|------|------|
@@ -403,7 +403,7 @@ clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 
 ## 能力边界声明
 
-本 skill 执行**静态分析 + 远程探测**，无法：
+本 skill 执行**静态分析**，无法：
 - 检测纯运行时的恶意行为
 - 保证不存在未知漏洞
 - 执行真实攻击或确认漏洞可利用性
@@ -413,7 +413,7 @@ v1.1 起，MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + 
 
 所有结论均为「当前检查范围内」的最佳评估。
 
-## Feature 12: 扫描历史
+## Feature 11: 扫描历史
 
 ```bash
 clawlock history            # 查看最近 20 条扫描记录
@@ -422,7 +422,7 @@ clawlock history --limit 50 # 查看最近 50 条
 
 自动记录每次 `clawlock scan` 的评分、高危数、需关注数和设备指纹，持久化存储到 `~/.clawlock/scan_history.json`。支持趋势对比（📈 评分提升 / 📉 评分下降）。
 
-## Feature 13: 持续监控
+## Feature 12: 持续监控
 
 ```bash
 clawlock watch                    # 每 5 分钟扫描一次，Ctrl+C 停止

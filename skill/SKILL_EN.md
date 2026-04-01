@@ -19,7 +19,7 @@ metadata:
       python: ">=3.9"
       pip_package: "clawlock"
       bins_optional:
-        - promptfoo  # Only needed for Feature 8 red-team; all other features are zero-dependency
+        - promptfoo  # Only needed for Feature 7 red-team; all other features are zero-dependency
     note: >
       MCP deep scan and Agent-Scan use built-in Python engines.
       ai-infra-guard binary is no longer required. If installed, it auto-enhances results.
@@ -76,14 +76,13 @@ After triggering, classify the request and stay narrow — **do not cross featur
 | Check new skill before importing | **Feature 3: Skill Import Pre-check** | None |
 | Harden / tighten config | **Feature 4: Hardening Wizard** | None |
 | SOUL.md / memory file drift | **Feature 5: Drift Detection** | None |
-| Find installations on this machine | **Feature 7: Discovery** | None |
-| Red-team / jailbreak test | **Feature 8: LLM Red-Team** | ⚠️ Requires promptfoo |
-| MCP server security | **Feature 9: MCP Deep Scan** | None (v1.1 built-in engine) |
-| React2Shell / CVE-2025-55182 | **Feature 10: Dependency CVE checks (integrated into code scans)** | None |
-| Multi-agent security scan | **Feature 11: Agent-Scan** | None (v1.1 built-in engine) |
-| View scan history trends | **Feature 12: Scan History** | None |
-| Continuous monitoring | **Feature 13: Watch Mode** | None |
-| Continuous monitoring mode | **Feature 13: Watch Mode** |
+| Find installations on this machine | **Feature 6: Discovery** | None |
+| Red-team / jailbreak test | **Feature 7: LLM Red-Team** | ⚠️ Requires promptfoo |
+| MCP server security | **Feature 8: MCP Deep Scan** | None (v1.1 built-in engine) |
+| React2Shell / CVE-2025-55182 | **Feature 9: Dependency CVE checks (integrated into code scans)** | None |
+| Multi-agent security scan | **Feature 10: Agent-Scan** | None (v1.1 built-in engine) |
+| View scan history trends | **Feature 11: Scan History** | None |
+| Continuous monitoring | **Feature 12: Watch Mode** | None |
 
 Do not treat normal Claw usage, debugging, or dependency installation as reasons to trigger this skill.
 
@@ -91,7 +90,7 @@ Do not treat normal Claw usage, debugging, or dependency installation as reasons
 
 ## Scan Start Prompt
 
-Before starting any scan (Features 1–11), output a single startup line:
+Before starting any scan (Features 1–10), output a single startup line:
 
 ```
 🔍 ClawLock scanning {target} for security issues, please wait...
@@ -169,7 +168,7 @@ Combines **cloud threat intelligence** + **local 46-pattern static analysis**.
 
 #### 4.2 Local Static Analysis (46 patterns)
 
-🔴 Critical (confirmed malicious): credential exfil (curl/wget) · reverse shell (bash/nc/Python/mkfifo) · crypto mining · destructive deletion · chmod 777 · prompt injection (override/hijack/jailbreak/Chinese) · obfuscated payloads (base64→shell) · zero-width chars
+🔴 Critical (confirmed malicious): credential exfil (curl/wget) · reverse shell (bash/nc/Python/mkfifo) · crypto mining · destructive deletion · chmod 777 · prompt injection (override/hijack/jailbreak/Chinese) · obfuscated payloads (base64→shell) · zero-width chars · nested shell command obfuscation (`sh -c`/`bash -c`/`cmd /c` multi-layer wrapping to bypass detection)
 
 🔴 High signal: Unicode escape obfuscation · hardcoded credentials · AI API keys · dangerous env var export · cron persistence · DNS exfiltration · user input into eval · recursive deletion of system dirs
 
@@ -278,12 +277,13 @@ Confirmed risk:
 clawlock precheck ./new-skill/SKILL.md
 ```
 
-5-dimension detection:
+6-dimension detection:
 1. **Prompt injection** — 46 malicious patterns (including Chinese)
-2. **Sensitive permissions** — sudo/root/full disk/dangerous env vars
-3. **Suspicious URLs** — .xyz/.tk/.ml high-risk TLDs
-4. **Hidden content** — Zero-width characters (Unicode smuggling)
-5. **Abnormal size** — File exceeds 50KB
+2. **Shell deobfuscation** — recursively unwraps `sh -c`/`bash -c`/`cmd /c` nesting before matching
+3. **Sensitive permissions** — sudo/root/full disk/dangerous env vars
+4. **Suspicious URLs** — .xyz/.tk/.ml high-risk TLDs
+5. **Hidden content** — Zero-width characters (Unicode smuggling)
+6. **Abnormal size** — File exceeds 50KB
 
 ---
 
@@ -312,7 +312,7 @@ clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
 
 ---
 
-## Features 5–11: Additional Capabilities
+## Features 5–10: Additional Capabilities
 
 ```bash
 clawlock soul --update-baseline    # Update drift baseline
@@ -330,7 +330,7 @@ clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment l
 
 ## Full Report Output Specification
 
-**The following applies ONLY to Feature 1 full scan**. Do not use for Feature 2-11 single-item responses.
+**The following applies ONLY to Feature 1 full scan**. Do not use for Feature 2-10 single-item responses.
 
 ### Strict Output Boundary
 
@@ -346,7 +346,7 @@ clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment l
 
 📅 {datetime}
 🖥️ {adapter} {version} · {OS}
-📦 Score {score}/100 · {1-sentence risk summary}
+📦 Score {score}/100 · Grade {S/A/B/C/D} · {1-sentence risk summary}
 
 | Check | Status | Details |
 |-------|--------|---------|
@@ -405,7 +405,7 @@ clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment l
 
 ## Capability Boundaries
 
-This skill performs **static analysis + remote probing**. It cannot:
+This skill performs **static analysis**. It cannot:
 - Detect purely runtime malicious behavior
 - Guarantee the absence of unknown vulnerabilities
 - Execute real attacks or confirm exploitability
@@ -415,7 +415,7 @@ Since v1.1, MCP deep scan and Agent-Scan use built-in Python engines (regex + AS
 
 All conclusions represent best-effort assessment within current check scope.
 
-## Feature 12: Scan History
+## Feature 11: Scan History
 
 ```bash
 clawlock history            # View last 20 scan records
@@ -424,7 +424,7 @@ clawlock history --limit 50 # View last 50
 
 Automatically records score, critical/warning counts, and device fingerprint for every `clawlock scan` run. Persistent storage at `~/.clawlock/scan_history.json`. Supports trend comparison (📈 improving / 📉 degrading).
 
-## Feature 13: Watch Mode
+## Feature 12: Watch Mode
 
 ```bash
 clawlock watch                    # Scan every 5 minutes, Ctrl+C to stop

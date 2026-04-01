@@ -13,6 +13,8 @@ Built for both security teams and individual developers — install with one com
 ## Highlights
 
 - **75+ detection rules** across 9 scan steps covering config, supply chain, prompt injection, MCP tool poisoning, CVE, credential audit, cost analysis, and more
+- **Security scoring system** — 9-domain weighted scoring (S/A/B/C/D grades) with exponential decay, CVE severity-aware grading, and auto-cap at 59 for critical self-config issues
+- **Shell command deobfuscation** — recursively unwraps nested `sh -c`, `bash -c`, `cmd /c`, `powershell -c` invocations before pattern matching
 - **Built-in MCP deep scan engine** — 28+ patterns across 14 risk categories + Python AST taint tracking, zero external dependency
 - **Built-in OWASP ASI 14 Agent-Scan** — 3-layer detection (config + code patterns + optional LLM assessment)
 - **12 CLI commands** — from full scan to single-skill audit
@@ -44,7 +46,7 @@ clawlock scan --format html -o report.html # HTML report
 | 1 | Config audit + risky env vars | Per-adapter rules + NODE_OPTIONS/LD_PRELOAD detection |
 | 2 | Process detection + port exposure | Running processes + 0.0.0.0 listeners |
 | 3 | Credential directory audit | File/directory permissions on credential stores |
-| 4 | Skill supply chain (46 patterns) | Reverse shells, credential exfil, prompt injection, DNS exfil, zero-width chars |
+| 4 | Skill supply chain (46 patterns) | Reverse shells, credential exfil, prompt injection, DNS exfil, zero-width chars + shell deobfuscation |
 | 5 | SOUL.md + memory file drift | SHA-256 baseline comparison for SOUL/CLAUDE/HEARTBEAT/MEMORY.md |
 | 6 | MCP exposure + 6 tool poisoning | Parameter tampering, function hijacking, rug pull, tool shadowing |
 | 7 | CVE matching | Cloud vulnerability intelligence (589+ CVEs, 43 AI frameworks) |
@@ -141,9 +143,9 @@ clawlock/
 │   └── promptfoo.py        # LLM red-team wrapper (9 plugins × 8 strategies)
 ├── adapters/               # Platform abstraction (4 Claw adapters)
 ├── hardening/              # 10 measures with UX impact disclosure
-├── reporters/              # Rich terminal + JSON + HTML
+├── reporters/              # Rich terminal + JSON + HTML + security scoring (S~D)
 ├── utils/                  # Cross-platform abstraction (Windows/Mac/Linux/Android)
-└── __main__.py             # Typer CLI (13 commands)
+└── __main__.py             # Typer CLI (12 commands)
 ```
 
 ## CI/CD Integration
