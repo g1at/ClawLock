@@ -13,9 +13,11 @@
 ## 核心亮点
 
 - **75+ 条检测规则**，覆盖 9 步扫描：配置审计、供应链、Prompt 注入、MCP 工具投毒、CVE、凭证审计、成本分析等
+- **安全评分体系** — 9 大安全域加权评分（S/A/B/C/D 等级），指数衰减算法，CVE 严重级别感知，自身配置高危自动封顶 59 分
+- **Shell 命令反混淆** — 递归解包 `sh -c`、`bash -c`、`cmd /c`、`powershell -c` 嵌套命令后再进行模式匹配
 - **内建 MCP 深度扫描引擎** — 28+ 模式覆盖 14 个风险类别 + Python AST 污点追踪，零外部依赖
 - **内建 OWASP ASI 14 Agent-Scan** — 3 层检测架构（配置分析 + 代码模式 + 可选 LLM 语义评估）
-- **13 个 CLI 命令** — 从全量扫描到单 Skill 审计
+- **12 个 CLI 命令** — 从全量扫描到单 Skill 审计
 - **4 个平台适配器** — 自动识别 OpenClaw / ZeroClaw / Claude Code，或回退到通用模式
 - **全平台兼容** — 在 Linux、macOS、Windows、Android (Termux) 上无需额外配置即可运行
 - **交互式加固** — 影响功能的操作带 UX 影响声明，需要用户明确确认
@@ -44,7 +46,7 @@ clawlock scan --format html -o report.html # 输出 HTML 报告
 | 1 | 配置审计 + 危险环境变量 | 按适配器检查配置 + NODE_OPTIONS/LD_PRELOAD 等 |
 | 2 | 进程检测 + 端口暴露 | 运行中的 Claw 进程 + 0.0.0.0 监听检测 |
 | 3 | 凭证目录权限审计 | 凭证文件和目录的访问权限检查 |
-| 4 | Skill 供应链 (46 模式) | 反弹 Shell、凭证外传、Prompt 注入、DNS 外传、零宽字符 |
+| 4 | Skill 供应链 (46 模式) | 反弹 Shell、凭证外传、Prompt 注入、DNS 外传、零宽字符 + Shell 反混淆 |
 | 5 | 提示词 + 记忆文件 Drift | SOUL/CLAUDE/HEARTBEAT/MEMORY.md 的 SHA-256 基准对比 |
 | 6 | MCP 暴露面 + 6 种工具投毒 | 参数篡改、函数劫持、Rug Pull、Tool Shadowing |
 | 7 | CVE 漏洞匹配 | 云端漏洞情报库（589+ CVEs，43 个 AI 框架） |
@@ -143,9 +145,9 @@ clawlock/
 │   └── promptfoo.py        # LLM 红队测试封装（9 插件 × 8 策略）
 ├── adapters/               # 平台适配层（4 个 Claw 适配器）
 ├── hardening/              # 10 项加固措施 + UX 影响声明
-├── reporters/              # Rich 终端 + JSON + HTML 报告
+├── reporters/              # Rich 终端 + JSON + HTML 报告 + 安全评分 (S~D)
 ├── utils/                  # 跨平台抽象层（Windows / Mac / Linux / Android）
-└── __main__.py             # Typer CLI（14 个命令）
+└── __main__.py             # Typer CLI（12 个命令）
 ```
 
 ## CI/CD 集成
