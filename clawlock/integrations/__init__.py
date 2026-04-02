@@ -1,20 +1,52 @@
 """
-ClawLock v1.2.1 integrations — cloud intelligence, cost analysis,
+ClawLock v1.2.2 integrations — cloud intelligence, cost analysis,
 external scanner, and Agent-Scan.
 """
 
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import httpx
 from ..scanners import Finding, CRIT, WARN, INFO
 
 CLOUD_BASE = os.environ.get("CLAWLOCK_CLOUD_URL", "https://matrix.tencent.com/clawscan")
 _TIMEOUT = 30.0
+
+
+def _parse_version_tuple(ver: str) -> Tuple[int, ...]:
+    """Parse a version string like '2026.4.1' into a comparable tuple of ints."""
+    m = re.findall(r"\d+", ver)
+    return tuple(int(x) for x in m) if m else ()
+
+
+def _extract_fixed_version(info: dict, remediation: str) -> str:
+    """Try to extract the fixed/patched version from advisory fields or remediation text."""
+    # Try common API field names first.
+    for key in ("fixed_version", "patched_version", "fix_version",
+                "patched_in", "fixed_in", "affected_before"):
+        val = info.get(key, "")
+        if val and re.search(r"\d+\.\d+", str(val)):
+            return str(val).strip()
+    # Fallback: extract version from remediation text.
+    # Matches patterns like "升级至 2026.2.24", "upgrade to v2026.3.7"
+    m = re.search(r"(?:升级[到至]|upgrade\s+to)\s*v?(\d+(?:\.\d+){1,3})", remediation, re.I)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _is_version_fixed(current: str, fixed: str) -> bool:
+    """Return True if current version >= fixed version (i.e. CVE is patched)."""
+    cur = _parse_version_tuple(current)
+    fix = _parse_version_tuple(fixed)
+    if not cur or not fix:
+        return False
+    return cur >= fix
 
 
 async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Finding]:
@@ -41,6 +73,23 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
         title = info.get("summary", info.get("title", cve_id))
         desc = info.get("details", info.get("description", ""))[:200]
         remediation = info.get("security_advise", "升级到最新版本。")
+
+        # Skip CVEs already fixed in the current version.
+        if version:
+            fixed_ver = _extract_fixed_version(info, remediation)
+            if fixed_ver and _is_version_fixed(version, fixed_ver):
+                findings.append(
+                    Finding(
+                        "cve",
+                        INFO,
+                        f"[{cve_id}] (已修复) {title}",
+                        f"当前版本 {version} >= 修复版本 {fixed_ver}，该漏洞已不受影响。",
+                        remediation="无需操作。",
+                        metadata={"cve_id": cve_id, "severity": sev, "fixed_version": fixed_ver},
+                    )
+                )
+                continue
+
         findings.append(
             Finding(
                 "cve",
