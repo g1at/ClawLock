@@ -33,8 +33,11 @@ def _extract_fixed_version(info: dict, remediation: str) -> str:
         if val and re.search(r"\d+\.\d+", str(val)):
             return str(val).strip()
     # Fallback: extract version from remediation text.
-    # Matches patterns like "升级至 2026.2.24", "upgrade to v2026.3.7"
-    m = re.search(r"(?:升级[到至]|upgrade\s+to)\s*v?(\d+(?:\.\d+){1,3})", remediation, re.I)
+    # Matches "升级 OpenClaw 至 2026.2.24", "升级到 v2026.3.7", "upgrade to v2026.3.7", etc.
+    m = re.search(r"升级.{0,30}?[到至]\s*v?(\d+(?:\.\d+){1,3})", remediation)
+    if m:
+        return m.group(1)
+    m = re.search(r"upgrade\s+to\s*v?(\d+(?:\.\d+){1,3})", remediation, re.I)
     if m:
         return m.group(1)
     return ""
