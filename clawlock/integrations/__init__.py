@@ -1,5 +1,5 @@
 """
-ClawLock v1.2.2 integrations — cloud intelligence, cost analysis,
+ClawLock v1.3.0 integrations — cloud intelligence, cost analysis,
 external scanner, and Agent-Scan.
 """
 
