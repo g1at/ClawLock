@@ -1,5 +1,5 @@
 """
-ClawLock v1.2.0 integrations — cloud intelligence, cost analysis,
+ClawLock v1.2.1 integrations — cloud intelligence, cost analysis,
 external scanner, and Agent-Scan.
 """
 
@@ -14,7 +14,7 @@ import httpx
 from ..scanners import Finding, CRIT, WARN, INFO
 
 CLOUD_BASE = os.environ.get("CLAWLOCK_CLOUD_URL", "https://matrix.tencent.com/clawscan")
-_TIMEOUT = 10.0
+_TIMEOUT = 30.0
 
 
 async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Finding]:
