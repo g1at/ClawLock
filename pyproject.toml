@@ -28,8 +28,8 @@ dev = ["pytest>=7.0", "ruff>=0.3", "mypy>=1.8"]
 clawlock = "clawlock.__main__:app"
 
 [project.urls]
-Homepage = "https://github.com/g1at/clawlock"
-Repository = "https://github.com/g1at/clawlock"
+Homepage = "https://github.com/g1at/ClawLock/"
+Repository = "https://github.com/g1at/ClawLock/"
 
 [tool.setuptools.packages.find]
 include = ["clawlock*"]
