@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.2.2"
+    version: "1.3.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -17,8 +17,10 @@ metadata:
     requires:
       python: ">=3.9"
       pip_package: "clawlock"
+      bins:
+        - clawlock    # 主二进制，配合 autoAllowSkills 可自动授权
       bins_optional:
-        - promptfoo  # 仅 Feature 7 红队测试需要，其余功能完全零外部依赖
+        - promptfoo   # 仅 Feature 7 红队测试需要，其余功能完全零外部依赖
     note: >
       MCP 深度扫描和 Agent-Scan 已内建引擎，不再需要 ai-infra-guard 二进制。
       如果系统中已安装 ai-infra-guard，会自动作为可选增强使用。

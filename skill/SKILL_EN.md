@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.2.2"
+    version: "1.3.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -18,8 +18,10 @@ metadata:
     requires:
       python: ">=3.9"
       pip_package: "clawlock"
+      bins:
+        - clawlock    # Main binary; works with autoAllowSkills for automatic approval
       bins_optional:
-        - promptfoo  # Only needed for Feature 7 red-team; all other features are zero-dependency
+        - promptfoo   # Only needed for Feature 7 red-team; all other features are zero-dependency
     note: >
       MCP deep scan and Agent-Scan use built-in Python engines.
       ai-infra-guard binary is no longer required. If installed, it auto-enhances results.
