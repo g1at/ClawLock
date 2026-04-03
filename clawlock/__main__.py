@@ -1,4 +1,4 @@
-"""ClawLock v1.3.0 CLI - 12 commands."""
+"""ClawLock v1.4.0 CLI - 12 commands."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from .scanners import (
 
 app = typer.Typer(
     name="clawlock",
-    help="ClawLock v1.3.0 - security scan and hardening for Claw platforms",
+    help="ClawLock v1.4.0 - security scan and hardening for Claw platforms",
     rich_markup_mode="rich",
     no_args_is_help=True,
 )
