@@ -1,5 +1,5 @@
 """
-ClawLock v1.3.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v1.4.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -12,13 +12,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from ..adapters import AdapterSpec, load_config, run_cmd
+from ..i18n import t
 
 CRIT = "critical"
 HIGH = "high"
 WARN = "medium"
 INFO = "info"
 LEVEL_EMOJI = {CRIT: "HIGH", HIGH: "HIGH", WARN: "WARN", INFO: "INFO"}
-LEVEL_LABEL_CN = {CRIT: "高危", HIGH: "高危", WARN: "需关注", INFO: "提示"}
+LEVEL_LABEL_CN = {
+    CRIT: t("高危", "HIGH"),
+    HIGH: t("高危", "HIGH"),
+    WARN: t("需关注", "WARN"),
+    INFO: t("提示", "INFO"),
+}
 
 
 @dataclass
@@ -51,41 +57,41 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
             "gatewayAuth",
             lambda v: not v,
             CRIT,
-            "Gateway 鉴权未开启",
-            "任何能访问端口的人可直接连接 agent。",
-            "设置 gatewayAuth: true 并配置 token。",
+            t("Gateway 鉴权未开启", "Gateway auth not enabled"),
+            t("任何能访问端口的人可直接连接 agent。", "Anyone with port access can connect to the agent directly."),
+            t("设置 gatewayAuth: true 并配置 token。", "Set gatewayAuth: true and configure a token."),
         ),
         (
             "allowedDirectories",
             lambda v: isinstance(v, list) and "/" in v,
             WARN,
-            "文件访问范围包含根目录",
-            "skill 可读写系统任意文件。",
-            "收紧到项目目录。",
+            t("文件访问范围包含根目录", "File access scope includes root directory"),
+            t("skill 可读写系统任意文件。", "Skills can read/write any file on the system."),
+            t("收紧到项目目录。", "Restrict to the project directory."),
         ),
         (
             "enableBrowserControl",
             lambda v: v is True,
             WARN,
-            "已开启浏览器控制权限",
-            "agent 可控制本地浏览器会话。",
-            "设置 enableBrowserControl: false。",
+            t("已开启浏览器控制权限", "Browser control enabled"),
+            t("agent 可控制本地浏览器会话。", "Agent can control local browser sessions."),
+            t("设置 enableBrowserControl: false。", "Set enableBrowserControl: false."),
         ),
         (
             "allowNetworkAccess",
             lambda v: v is True,
             WARN,
-            "网络访问未配置白名单",
-            "skill 可向任意地址发起请求。",
-            "配置 allowedNetworkDomains 白名单。",
+            t("网络访问未配置白名单", "Network access has no allowlist"),
+            t("skill 可向任意地址发起请求。", "Skills can make requests to any address."),
+            t("配置 allowedNetworkDomains 白名单。", "Configure allowedNetworkDomains allowlist."),
         ),
         (
             "sessionRetentionDays",
             lambda v: isinstance(v, int) and v > 30,
             INFO,
-            "会话日志保留时间过长",
-            "超过 30 天。",
-            "设置 sessionRetentionDays: 7。",
+            t("会话日志保留时间过长", "Session log retention too long"),
+            t("超过 30 天。", "Exceeds 30 days."),
+            t("设置 sessionRetentionDays: 7。", "Set sessionRetentionDays: 7."),
         ),
     ],
     "zeroclaw": [
@@ -93,17 +99,17 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
             "auth.enabled",
             lambda v: not v,
             CRIT,
-            "ZeroClaw 鉴权未开启",
-            "服务端口未设置认证。",
-            "启用 auth.enabled: true。",
+            t("ZeroClaw 鉴权未开启", "ZeroClaw auth not enabled"),
+            t("服务端口未设置认证。", "Service port has no authentication."),
+            t("启用 auth.enabled: true。", "Enable auth.enabled: true."),
         ),
         (
             "filesystem.allowedPaths",
             lambda v: isinstance(v, list) and any((p in ("/", "~") for p in v)),
             WARN,
-            "文件访问范围过宽",
-            "allowedPaths 包含根路径。",
-            "限制到项目路径。",
+            t("文件访问范围过宽", "File access scope too broad"),
+            t("allowedPaths 包含根路径。", "allowedPaths includes root path."),
+            t("限制到项目路径。", "Restrict to the project path."),
         ),
     ],
     "claude-code": [
@@ -111,9 +117,9 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
             "permissions.allow",
             lambda v: isinstance(v, list) and any(("**" in str(p) for p in v)),
             WARN,
-            "权限使用通配符 **",
-            "settings.json 中存在 ** 通配符。",
-            "替换为具体路径。",
+            t("权限使用通配符 **", "Permissions use ** wildcard"),
+            t("settings.json 中存在 ** 通配符。", "** wildcard found in settings.json."),
+            t("替换为具体路径。", "Replace with specific paths."),
         )
     ],
     "_common": [
@@ -121,33 +127,33 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
             "server.host",
             lambda v: v in ("0.0.0.0", "::", "*"),
             HIGH,
-            "服务绑定到所有网络接口",
-            "外部网络可能直接访问。",
-            "绑定到 127.0.0.1。",
+            t("服务绑定到所有网络接口", "Service bound to all network interfaces"),
+            t("外部网络可能直接访问。", "External networks may access directly."),
+            t("绑定到 127.0.0.1。", "Bind to 127.0.0.1."),
         ),
         (
             "tls.enabled",
             lambda v: v in (False, "disabled", None),
             WARN,
-            "TLS/HTTPS 未启用",
-            "通信未加密。",
-            "启用 TLS。",
+            t("TLS/HTTPS 未启用", "TLS/HTTPS not enabled"),
+            t("通信未加密。", "Communication is not encrypted."),
+            t("启用 TLS。", "Enable TLS."),
         ),
         (
             "approvalMode",
             lambda v: v in (False, "none", "disabled", None),
             WARN,
-            "操作审批未启用",
-            "高危操作无需确认。",
-            "启用审批模式。",
+            t("操作审批未启用", "Operation approval not enabled"),
+            t("高危操作无需确认。", "High-risk operations require no confirmation."),
+            t("启用审批模式。", "Enable approval mode."),
         ),
         (
             "rateLimit.enabled",
             lambda v: v in (False, None, "disabled"),
             WARN,
-            "未配置速率限制",
-            "可被暴力破解或滥用，可能导致 API 额度耗尽。",
-            "为 Gateway 配置请求速率限制。",
+            t("未配置速率限制", "Rate limiting not configured"),
+            t("可被暴力破解或滥用，可能导致 API 额度耗尽。", "Vulnerable to brute force or abuse; may exhaust API quota."),
+            t("为 Gateway 配置请求速率限制。", "Configure request rate limiting for the Gateway."),
         ),
     ],
 }
@@ -198,10 +204,10 @@ def _check_secrets(obj: Any, path: str) -> List[Finding]:
                     Finding(
                         "config",
                         CRIT,
-                        f"配置中发现硬编码凭据: {label}",
-                        f"在 {path} 中发现疑似 {label}。",
+                        t(f"配置中发现硬编码凭据: {label}", f"Hardcoded credential found: {label}"),
+                        t(f"在 {path} 中发现疑似 {label}。", f"Suspected {label} found in {path}."),
                         path,
-                        remediation="移除硬编码凭据，改用环境变量。",
+                        remediation=t("移除硬编码凭据，改用环境变量。", "Remove hardcoded credentials; use environment variables instead."),
                     )
                 )
                 break
@@ -220,10 +226,10 @@ def _check_risky_env(config: dict, cfg_path: str) -> List[Finding]:
                         Finding(
                             "config",
                             HIGH,
-                            f"发现危险环境变量: {k}",
-                            f"配置项 {path}.{k} 可被利用注入恶意代码。",
+                            t(f"发现危险环境变量: {k}", f"Dangerous env var found: {k}"),
+                            t(f"配置项 {path}.{k} 可被利用注入恶意代码。", f"Config key {path}.{k} can be exploited for code injection."),
                             f"{cfg_path}:{path}.{k}",
-                            remediation=f"移除 {k} 或确认其值安全。",
+                            remediation=t(f"移除 {k} 或确认其值安全。", f"Remove {k} or verify its value is safe."),
                         )
                     )
                 _walk(v, f"{path}.{k}")
@@ -299,8 +305,8 @@ def scan_processes(adapter: AdapterSpec) -> List[Finding]:
                     Finding(
                         "process",
                         INFO,
-                        f"检测到运行中的进程: {proc_name}",
-                        f"PID {proc['pid']}, 用户 {proc.get('user', 'N/A')}",
+                        t(f"检测到运行中的进程: {proc_name}", f"Running process detected: {proc_name}"),
+                        t(f"PID {proc['pid']}, 用户 {proc.get('user', 'N/A')}", f"PID {proc['pid']}, user {proc.get('user', 'N/A')}"),
                         f"ps:{proc['pid']}",
                     )
                 )
@@ -311,9 +317,9 @@ def scan_processes(adapter: AdapterSpec) -> List[Finding]:
                 Finding(
                     "process",
                     HIGH,
-                    "发现对外监听的高危端口",
-                    f"进程绑定 0.0.0.0: {line[:80]}",
-                    remediation="将监听地址改为 127.0.0.1。",
+                    t("发现对外监听的高危端口", "High-risk port exposed to network"),
+                    t(f"进程绑定 0.0.0.0: {line[:80]}", f"Process bound to 0.0.0.0: {line[:80]}"),
+                    remediation=t("将监听地址改为 127.0.0.1。", "Change listen address to 127.0.0.1."),
                 )
             )
     return findings
@@ -346,8 +352,9 @@ def discover_installations() -> List[Finding]:
                     Finding(
                         "discovery",
                         INFO,
-                        f"发现 {product} 安装: {d}",
-                        f"配置文件 {len(configs)} 个, Skills {skill_count} 个, 会话 {session_count} 个",
+                        t(f"发现 {product} 安装: {d}", f"Found {product} installation: {d}"),
+                        t(f"配置文件 {len(configs)} 个, Skills {skill_count} 个, 会话 {session_count} 个",
+                          f"{len(configs)} config(s), {skill_count} skill(s), {session_count} session(s)"),
                         str(d),
                     )
                 )
@@ -359,15 +366,15 @@ def discover_installations() -> List[Finding]:
     for name, path in bins.items():
         if path:
             findings.append(
-                Finding("discovery", INFO, f"发现工具: {name}", f"路径: {path}")
+                Finding("discovery", INFO, t(f"发现工具: {name}", f"Tool found: {name}"), t(f"路径: {path}", f"Path: {path}"))
             )
     if not found_any:
         findings.append(
             Finding(
                 "discovery",
                 INFO,
-                "未发现已安装的 Claw 产品",
-                "未在标准路径下找到安装目录。",
+                t("未发现已安装的 Claw 产品", "No Claw product installations found"),
+                t("未在标准路径下找到安装目录。", "No installation directory found in standard paths."),
             )
         )
     return findings
@@ -378,8 +385,8 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
     from ..utils import check_file_permission, IS_WINDOWS
 
     findings = []
-    fix_hint = "使用 icacls 移除 Everyone/Users 访问权限" if IS_WINDOWS else "chmod 700"
-    fix_hint_f = "使用 icacls 限制为仅所有者访问" if IS_WINDOWS else "chmod 600"
+    fix_hint = t("使用 icacls 移除 Everyone/Users 访问权限", "Use icacls to remove Everyone/Users access") if IS_WINDOWS else "chmod 700"
+    fix_hint_f = t("使用 icacls 限制为仅所有者访问", "Use icacls to restrict to owner-only access") if IS_WINDOWS else "chmod 600"
     for cred_path_str in adapter.credential_dirs:
         cred_path = Path(cred_path_str).expanduser()
         if not cred_path.exists():
@@ -391,8 +398,8 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
                     Finding(
                         "credential",
                         HIGH,
-                        f"凭证目录权限过宽: {cred_path.name}",
-                        f"目录 {cred_path} 对所有用户可读 ({desc})。",
+                        t(f"凭证目录权限过宽: {cred_path.name}", f"Credential dir too permissive: {cred_path.name}"),
+                        t(f"目录 {cred_path} 对所有用户可读 ({desc})。", f"Directory {cred_path} is world-readable ({desc})."),
                         str(cred_path),
                         remediation=f"{fix_hint} {cred_path}",
                     )
@@ -402,8 +409,8 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
                     Finding(
                         "credential",
                         WARN,
-                        f"凭证目录对组用户可读: {cred_path.name}",
-                        f"目录 {cred_path} 组可读 ({desc})。",
+                        t(f"凭证目录对组用户可读: {cred_path.name}", f"Credential dir group-readable: {cred_path.name}"),
+                        t(f"目录 {cred_path} 组可读 ({desc})。", f"Directory {cred_path} is group-readable ({desc})."),
                         str(cred_path),
                         remediation=f"{fix_hint} {cred_path}",
                     )
@@ -423,8 +430,8 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
                                 Finding(
                                     "credential",
                                     HIGH,
-                                    f"凭证文件权限过宽: {f.name}",
-                                    f"文件 {f} 对所有用户可读 ({fd})。",
+                                    t(f"凭证文件权限过宽: {f.name}", f"Credential file too permissive: {f.name}"),
+                                    t(f"文件 {f} 对所有用户可读 ({fd})。", f"File {f} is world-readable ({fd})."),
                                     str(f),
                                     remediation=f"{fix_hint_f} {f}",
                                 )
@@ -482,263 +489,263 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     (
         "curl\\b[^|&;#\\n]*\\$\\{?(?:HOME|TOKEN|API_KEY|SECRET|PASSWORD|CREDENTIAL|ANTHROPIC_API_KEY|OPENAI_API_KEY)\\}?",
         CRIT,
-        "凭证外传 (curl)",
-        "凭证通过 curl 发送到外部。",
+        t("凭证外传 (curl)", "Credential exfiltration (curl)"),
+        t("凭证通过 curl 发送到外部。", "Credentials sent externally via curl."),
     ),
     (
         "wget\\b[^|&;#\\n]*\\$\\{?(?:TOKEN|API_KEY|SECRET|PASSWORD)\\}?",
         CRIT,
-        "凭证外传 (wget)",
-        "凭证通过 wget 发送到外部。",
+        t("凭证外传 (wget)", "Credential exfiltration (wget)"),
+        t("凭证通过 wget 发送到外部。", "Credentials sent externally via wget."),
     ),
     (
         "bash\\s+-i\\s+>?&?\\s*/dev/tcp/",
         CRIT,
-        "反弹 Shell (bash /dev/tcp)",
-        "bash 反弹 shell。",
+        t("反弹 Shell (bash /dev/tcp)", "Reverse shell (bash /dev/tcp)"),
+        t("bash 反弹 shell。", "Bash reverse shell."),
     ),
     (
         "\\bnc\\b.{0,30}-e\\s+(?:/bin/bash|/bin/sh|sh)",
         CRIT,
-        "反弹 Shell (nc -e)",
-        "netcat 反弹 shell。",
+        t("反弹 Shell (nc -e)", "Reverse shell (nc -e)"),
+        t("netcat 反弹 shell。", "Netcat reverse shell."),
     ),
     (
         "python.{0,60}socket.{0,40}connect.{0,60}(?:subprocess|Popen)",
         CRIT,
-        "反弹 Shell (Python socket)",
-        "Python socket+subprocess。",
+        t("反弹 Shell (Python socket)", "Reverse shell (Python socket)"),
+        t("Python socket+subprocess。", "Python socket+subprocess."),
     ),
     (
         "(?i)\\b(?:xmrig|stratum\\+tcp://|xmr\\.pool\\.|monero|coinhive)",
         CRIT,
-        "挖矿程序特征",
-        "加密货币挖矿特征。",
+        t("挖矿程序特征", "Cryptominer signature"),
+        t("加密货币挖矿特征。", "Cryptocurrency mining signature detected."),
     ),
     (
         "\\brm\\s+-rf\\s+(?:/root|/home|/etc|/var|/usr|~)\\b",
         CRIT,
-        "危险批量删除",
-        "rm -rf 指向系统关键目录。",
+        t("危险批量删除", "Dangerous mass deletion"),
+        t("rm -rf 指向系统关键目录。", "rm -rf targets critical system directories."),
     ),
     (
         "(?i)ignore\\s+(?:all\\s+)?(?:previous|above)\\s+instructions?",
         CRIT,
-        "提示词注入：覆盖指令",
-        "供应链 prompt injection。",
+        t("提示词注入：覆盖指令", "Prompt injection: instruction override"),
+        t("供应链 prompt injection。", "Supply-chain prompt injection."),
     ),
     (
         "(?i)you\\s+are\\s+now\\s+(?:a\\s+)?(?:different|new|another|unrestricted|uncensored)",
         CRIT,
-        "提示词注入：角色劫持",
-        "重置 LLM 角色。",
+        t("提示词注入：角色劫持", "Prompt injection: role hijacking"),
+        t("重置 LLM 角色。", "LLM role reset attempt."),
     ),
     (
         "(?i)(?:jailbreak|dan\\s+mode|developer\\s+mode|do\\s+anything\\s+now|skeleton\\s+key)",
         CRIT,
-        "越狱关键词",
-        "jailbreak / DAN / Skeleton Key。",
+        t("越狱关键词", "Jailbreak keywords"),
+        t("jailbreak / DAN / Skeleton Key。", "Jailbreak / DAN / Skeleton Key."),
     ),
     (
         "base64\\s+-d\\s*[|>]\\s*(?:bash|sh|python|\\$\\()",
         CRIT,
-        "混淆载荷 (base64→shell)",
-        "base64→shell 管道。",
+        t("混淆载荷 (base64→shell)", "Obfuscated payload (base64→shell)"),
+        t("base64→shell 管道。", "base64→shell pipeline."),
     ),
     (
         "mkfifo\\s+.*\\bnc\\b",
         CRIT,
-        "命名管道反弹 Shell (mkfifo+nc)",
-        "mkfifo+nc 组合反弹 shell。",
+        t("命名管道反弹 Shell (mkfifo+nc)", "Named pipe reverse shell (mkfifo+nc)"),
+        t("mkfifo+nc 组合反弹 shell。", "mkfifo+nc reverse shell combo."),
     ),
     (
         "(?i)(?:chmod\\s+(?:777|a\\+rwx)\\s+)",
         CRIT,
-        "危险权限变更 (chmod 777)",
-        "将文件设为全局可读写执行。",
+        t("危险权限变更 (chmod 777)", "Dangerous permission change (chmod 777)"),
+        t("将文件设为全局可读写执行。", "File set to world-readable/writable/executable."),
     ),
     (
         "忽略(之前|上面|所有)(的)?(指令|规则|限制|约束)",
         CRIT,
-        "提示词注入：覆盖指令 (中文)",
-        "中文指令覆盖。",
+        t("提示词注入：覆盖指令 (中文)", "Prompt injection: instruction override (Chinese)"),
+        t("中文指令覆盖。", "Chinese instruction override."),
     ),
     (
         "(输出|显示|打印|泄露)(你的)?(系统提示|系统指令|内部规则)",
         HIGH,
-        "提示词注入：提取系统提示词 (中文)",
-        "提取系统提示词。",
+        t("提示词注入：提取系统提示词 (中文)", "Prompt injection: system prompt extraction (Chinese)"),
+        t("提取系统提示词。", "System prompt extraction attempt."),
     ),
     (
         "(你现在是|从现在开始你是|扮演|假装)(一个)?",
         WARN,
-        "疑似角色劫持 (中文)",
-        "中文角色重定义指令。",
+        t("疑似角色劫持 (中文)", "Suspected role hijacking (Chinese)"),
+        t("中文角色重定义指令。", "Chinese role redefinition instruction."),
     ),
     (
         "(?:\\\\u[0-9a-fA-F]{4}){6,}",
         HIGH,
-        "大量 Unicode 转义（疑似混淆）",
-        "Unicode 转义隐藏注入指令。",
+        t("大量 Unicode 转义（疑似混淆）", "Excessive Unicode escapes (suspected obfuscation)"),
+        t("Unicode 转义隐藏注入指令。", "Unicode escapes may hide injected instructions."),
     ),
     (
         "(?i)(?:password|secret|token|api_key|api-key)\\s*[=:]\\s*[\"\\'][^\\s\"\\']{12,}[\"\\']",
         HIGH,
-        "疑似硬编码凭证",
-        "代码中存在凭证字符串。",
+        t("疑似硬编码凭证", "Suspected hardcoded credential"),
+        t("代码中存在凭证字符串。", "Credential string found in code."),
     ),
     (
         "(?i)(?:ANTHROPIC_API_KEY|OPENAI_API_KEY|sk-[A-Za-z0-9]{32,}|sk-ant-[A-Za-z0-9\\-]{20,})",
         HIGH,
-        "疑似 AI API 密钥",
-        "发现 API key 格式字符串。",
+        t("疑似 AI API 密钥", "Suspected AI API key"),
+        t("发现 API key 格式字符串。", "API key format string detected."),
     ),
     (
         "(?i)(?:export|setenv|ENV)\\s+(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)\\s*=",
         HIGH,
-        "设置危险环境变量",
-        "通过 export 设置可注入代码的环境变量。",
+        t("设置危险环境变量", "Dangerous env var being set"),
+        t("通过 export 设置可注入代码的环境变量。", "Env var set via export that enables code injection."),
     ),
     (
         "(?i)(?:fsutil|format|diskpart|dd\\s+if=.*of=/dev/)",
         HIGH,
-        "磁盘级危险操作",
-        "磁盘格式化或低级写入操作。",
+        t("磁盘级危险操作", "Disk-level dangerous operation"),
+        t("磁盘格式化或低级写入操作。", "Disk formatting or low-level write operation."),
     ),
     (
         "(?i)crontab\\s+-.*(?:curl|wget|bash|python)",
         HIGH,
-        "Cron 持久化",
-        "通过 crontab 写入持久化任务。",
+        t("Cron 持久化", "Cron persistence"),
+        t("通过 crontab 写入持久化任务。", "Persistent task written via crontab."),
     ),
     (
         "(?i)(?:systemctl\\s+enable|launchctl\\s+load)\\s+",
         WARN,
-        "注册系统服务",
-        "注册持久化系统服务。",
+        t("注册系统服务", "System service registration"),
+        t("注册持久化系统服务。", "Persistent system service registered."),
     ),
-    ("\\beval\\s*\\(", WARN, "使用 eval()", "动态代码执行。"),
-    ("\\bexec\\s*\\(", WARN, "使用 exec()", "exec() 执行任意代码。"),
+    ("\\beval\\s*\\(", WARN, t("使用 eval()", "eval() usage"), t("动态代码执行。", "Dynamic code execution.")),
+    ("\\bexec\\s*\\(", WARN, t("使用 exec()", "exec() usage"), t("exec() 执行任意代码。", "exec() executes arbitrary code.")),
     (
         "^(?!\\s*#)\\s*\\bsubprocess\\.(?:Popen|call|run|check_output)\\s*\\(",
         WARN,
-        "调用子进程",
-        "执行系统子进程。",
+        t("调用子进程", "Subprocess invocation"),
+        t("执行系统子进程。", "System subprocess execution."),
     ),
     (
         "os\\.environ(?:\\.get)?\\s*[\\[(\"\\']+(?!CLAW_|SKILL_|APP_|PATH|HOME|USER|SHELL|TERM)[A-Z_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)",
         WARN,
-        "读取凭证类环境变量",
-        "访问疑似凭证类环境变量。",
+        t("读取凭证类环境变量", "Reading credential env var"),
+        t("访问疑似凭证类环境变量。", "Accessing suspected credential environment variable."),
     ),
     (
         "(?:~|Path\\.home\\(\\))\\s*/\\s*(?:Documents|Desktop|Downloads|Pictures|Movies|Library)",
         WARN,
-        "访问用户隐私目录",
-        "访问系统个人目录。",
+        t("访问用户隐私目录", "Accessing user private directory"),
+        t("访问系统个人目录。", "Accessing user's personal directory."),
     ),
     (
         "(?i)open\\([\"\\'](?:/etc/passwd|/etc/shadow|~/.ssh/|~/.aws/credentials)",
         WARN,
-        "访问系统敏感文件",
-        "读取敏感系统文件。",
+        t("访问系统敏感文件", "Accessing sensitive system file"),
+        t("读取敏感系统文件。", "Reading sensitive system file."),
     ),
     (
         "(?i)(?:requests|httpx|urllib|aiohttp)\\.(?:get|post|put|delete)\\s*\\(",
         WARN,
-        "外部网络请求",
-        "发起 HTTP 请求，确认目标是否可控。",
+        t("外部网络请求", "External network request"),
+        t("发起 HTTP 请求，确认目标是否可控。", "HTTP request made; verify target is not user-controlled."),
     ),
-    ("(?i)__import__\\s*\\(", WARN, "动态模块导入", "运行时动态导入。"),
+    ("(?i)__import__\\s*\\(", WARN, t("动态模块导入", "Dynamic module import"), t("运行时动态导入。", "Runtime dynamic import.")),
     (
         "(?i)(?:ctypes|cffi)\\.",
         WARN,
-        "调用 C 外部函数",
-        "使用 ctypes/cffi 调用原生代码。",
+        t("调用 C 外部函数", "C FFI invocation"),
+        t("使用 ctypes/cffi 调用原生代码。", "Native code called via ctypes/cffi."),
     ),
     (
         "(?i)(?:pickle|marshal|shelve)\\.(?:load|loads)\\s*\\(",
         WARN,
-        "反序列化不可信数据",
-        "pickle/marshal 反序列化可执行任意代码。",
+        t("反序列化不可信数据", "Deserialization of untrusted data"),
+        t("pickle/marshal 反序列化可执行任意代码。", "pickle/marshal deserialization can execute arbitrary code."),
     ),
     (
         "(?i)(?:yaml\\.(?:load|unsafe_load)\\s*\\()",
         WARN,
-        "不安全的 YAML 加载",
-        "yaml.load 不指定 Loader 可执行任意代码。",
+        t("不安全的 YAML 加载", "Unsafe YAML loading"),
+        t("yaml.load 不指定 Loader 可执行任意代码。", "yaml.load without Loader can execute arbitrary code."),
     ),
     (
         "(?i)(?:compile|exec|eval)\\s*\\(.*(?:request|input|argv|stdin)",
         HIGH,
-        "用户输入直接进入代码执行",
-        "用户可控输入直接传入 eval/exec/compile。",
+        t("用户输入直接进入代码执行", "User input passed to code execution"),
+        t("用户可控输入直接传入 eval/exec/compile。", "User-controlled input passed directly to eval/exec/compile."),
     ),
     (
         "(?i)(?:os\\.chmod|os\\.chown)\\s*\\(.*/etc/|/var/",
         WARN,
-        "修改系统目录权限",
-        "修改 /etc 或 /var 下的权限。",
+        t("修改系统目录权限", "System directory permission change"),
+        t("修改 /etc 或 /var 下的权限。", "Modifying permissions under /etc or /var."),
     ),
     (
         "(?i)(?:shutil\\.rmtree|os\\.removedirs)\\s*\\(.*/home|/root|/etc|/var",
         HIGH,
-        "递归删除系统目录",
-        "递归删除系统关键目录。",
+        t("递归删除系统目录", "Recursive system directory deletion"),
+        t("递归删除系统关键目录。", "Recursive deletion of critical system directories."),
     ),
     (
         "(?i)socket\\.(?:bind|listen)\\s*\\(",
         WARN,
-        "创建网络服务端",
-        "skill 创建监听 socket。",
+        t("创建网络服务端", "Network server creation"),
+        t("skill 创建监听 socket。", "Skill creates a listening socket."),
     ),
     (
         "(?i)(?:atob|Buffer\\.from)\\s*\\([\"\\'][A-Za-z0-9+/=]{40,}",
         WARN,
-        "Base64 解码长字符串",
-        "解码可能包含隐藏指令的 base64。",
+        t("Base64 解码长字符串", "Base64 decoding long string"),
+        t("解码可能包含隐藏指令的 base64。", "Decoding base64 that may contain hidden instructions."),
     ),
     (
         "(?i)String\\.fromCharCode\\s*\\(\\s*\\d+\\s*(?:,\\s*\\d+\\s*){5,}",
         WARN,
-        "fromCharCode 字符串构造",
-        "用 charCode 构造字符串可能隐藏指令。",
+        t("fromCharCode 字符串构造", "fromCharCode string construction"),
+        t("用 charCode 构造字符串可能隐藏指令。", "String built via charCode may hide instructions."),
     ),
     (
         "[\\u200b\\u200c\\u200d\\ufeff\\u2060]{2,}",
         HIGH,
-        "零宽字符序列",
-        "包含零宽字符，可能隐藏注入内容。",
+        t("零宽字符序列", "Zero-width character sequence"),
+        t("包含零宽字符，可能隐藏注入内容。", "Contains zero-width chars that may hide injected content."),
     ),
     (
         "(?i)(?:tool_call|function_call|tool_use).*(?:override|replace|shadow)",
         HIGH,
-        "工具覆盖意图",
-        "代码中出现工具覆盖关键词。",
+        t("工具覆盖意图", "Tool override intent"),
+        t("代码中出现工具覆盖关键词。", "Tool override keywords found in code."),
     ),
     (
         "(?i)(?:mcp|server).*(?:proxy|forward|redirect).*(?:all|every)",
         HIGH,
-        "MCP 流量劫持意图",
-        "可能劫持 MCP 通信。",
+        t("MCP 流量劫持意图", "MCP traffic hijacking intent"),
+        t("可能劫持 MCP 通信。", "May hijack MCP communication."),
     ),
     (
         "(?i)(?:fetch|axios|request)\\s*\\([\"\\']https?://(?!localhost|127\\.)",
         WARN,
-        "向外部 URL 发送请求",
-        "向非本地 URL 发起请求。",
+        t("向外部 URL 发送请求", "Request to external URL"),
+        t("向非本地 URL 发起请求。", "Request to non-local URL."),
     ),
     (
         "(?i)(?:dns|nslookup|dig)\\s+.*\\$",
         HIGH,
-        "DNS 外传 (DNS exfiltration)",
-        "通过 DNS 查询外传数据。",
+        t("DNS 外传 (DNS exfiltration)", "DNS exfiltration"),
+        t("通过 DNS 查询外传数据。", "Data exfiltration via DNS queries."),
     ),
     (
         "(?i)webhook[s]?\\s*[=:]\\s*[\"\\']https?://",
         WARN,
-        "配置了外部 Webhook",
-        "数据可能通过 webhook 外传。",
+        t("配置了外部 Webhook", "External webhook configured"),
+        t("数据可能通过 webhook 外传。", "Data may be exfiltrated via webhook."),
     ),
 ]
 
@@ -786,7 +793,7 @@ def scan_skill(skill_path: Path) -> List[Finding]:
                         if key in seen:
                             continue
                         seen.add(key)
-                        suffix = " (反混淆后发现)" if candidate is not line else ""
+                        suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
                         findings.append(
                             Finding(
                                 "skill",
@@ -815,11 +822,12 @@ def scan_skill(skill_path: Path) -> List[Finding]:
                         Finding(
                             "skill",
                             WARN,
-                            f"[{skill_name}] Shell 命令嵌套混淆",
-                            f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
+                            t(f"[{skill_name}] Shell 命令嵌套混淆", f"[{skill_name}] Nested shell command obfuscation"),
+                            t(f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
+                              f"Detected {len(unwrapped)} layers of shell wrapping; may attempt to bypass static analysis."),
                             f"{f.name}:{i}",
                             line.strip()[:120],
-                            remediation="审查解包后的实际命令。",
+                            remediation=t("审查解包后的实际命令。", "Review the unwrapped commands."),
                             metadata={
                                 "skill": skill_name,
                                 "file": str(f),
@@ -856,24 +864,24 @@ SOUL_INJECTION_PATTERNS: List[Tuple[str, str, str]] = [
     (
         "(?i)ignore\\s+(?:all\\s+)?(?:previous|above)\\s+instructions?",
         CRIT,
-        "指令覆盖注入",
+        t("指令覆盖注入", "Instruction override injection"),
     ),
     (
         "(?i)you\\s+are\\s+now\\s+(?:a\\s+new|another|a\\s+different|uncensored)",
         CRIT,
-        "角色劫持注入",
+        t("角色劫持注入", "Role hijacking injection"),
     ),
     (
         "(?i)(?:jailbreak|dan\\s+mode|unrestricted\\s+mode|developer\\s+mode)",
         CRIT,
-        "越狱关键词",
+        t("越狱关键词", "Jailbreak keywords"),
     ),
-    ("(?:\\\\u[0-9a-fA-F]{4}){6,}", HIGH, "大量 Unicode 转义"),
-    ("(?:[A-Za-z0-9+/]{60,}={0,2})", WARN, "长 base64 字符串"),
+    ("(?:\\\\u[0-9a-fA-F]{4}){6,}", HIGH, t("大量 Unicode 转义", "Excessive Unicode escapes")),
+    ("(?:[A-Za-z0-9+/]{60,}={0,2})", WARN, t("长 base64 字符串", "Long base64 string")),
     (
         "(?i)do\\s+not\\s+(?:reveal|disclose|share)\\s+(?:your\\s+)?(?:system\\s+prompt|instructions)",
         WARN,
-        "要求模型隐藏指令",
+        t("要求模型隐藏指令", "Instructs model to hide instructions"),
     ),
 ]
 HASH_STORE = Path.home() / ".clawlock" / "drift_hashes.json"
@@ -908,10 +916,10 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
                         "soul",
                         level,
                         f"{label}: {title}",
-                        f"位置: {filepath.name}:{i}",
+                        t(f"位置: {filepath.name}:{i}", f"Location: {filepath.name}:{i}"),
                         f"{filepath.name}:{i}",
                         line.strip()[:120],
-                        "检查该行是否合法。",
+                        t("检查该行是否合法。", "Check if this line is legitimate."),
                     )
                 )
                 break
@@ -923,10 +931,11 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
             Finding(
                 "soul",
                 WARN,
-                f"⚡ {label} 内容已变更（Drift 检测）",
-                f"{filepath.name} 的 SHA-256 哈希已变化。",
+                t(f"⚡ {label} 内容已变更（Drift 检测）", f"⚡ {label} content changed (Drift detection)"),
+                t(f"{filepath.name} 的 SHA-256 哈希已变化。", f"SHA-256 hash of {filepath.name} has changed."),
                 str(filepath),
-                remediation="若变更是预期的，运行 `clawlock soul --update-baseline` 更新基准。",
+                remediation=t("若变更是预期的，运行 `clawlock soul --update-baseline` 更新基准。",
+                              "If the change is expected, run `clawlock soul --update-baseline` to update the baseline."),
                 metadata={"prev": stored[key][:12], "curr": current_hash[:12]},
             )
         )
@@ -954,7 +963,7 @@ def scan_soul(
             found = c
             break
     if found:
-        findings.extend(_scan_single_file_drift(found, "系统提示词"))
+        findings.extend(_scan_single_file_drift(found, t("系统提示词", "System prompt")))
     return (findings, found)
 
 
@@ -964,7 +973,7 @@ def scan_memory_files(adapter: AdapterSpec) -> List[Finding]:
     for mem_path_str in adapter.memory_files:
         mem_path = Path(mem_path_str).expanduser()
         if mem_path.is_file():
-            findings.extend(_scan_single_file_drift(mem_path, "记忆文件"))
+            findings.extend(_scan_single_file_drift(mem_path, t("记忆文件", "Memory file")))
         elif mem_path.is_dir():
             for md in mem_path.glob("*.md"):
                 findings.extend(_scan_single_file_drift(md, "记忆文件"))
@@ -975,38 +984,38 @@ _MCP_ITP = [
     (
         "(?i)(?:all\\s+(?:messages?|emails?|data|files?)\\s+(?:sent|written|uploaded)\\s+(?:via|through)\\s+\\S+\\s+(?:must\\s+be\\s+)?(?:redirect|forward|copy|send))",
         CRIT,
-        "隐式工具投毒: 参数篡改 (ASR≈47%)",
-        "将合法参数静默重定向。",
+        t("隐式工具投毒: 参数篡改 (ASR≈47%)", "Implicit tool poisoning: parameter tampering (ASR≈47%)"),
+        t("将合法参数静默重定向。", "Silently redirecting legitimate parameters."),
     ),
     (
         "(?i)(?:instead\\s+of\\s+(?:calling|using|invoking)\\s+\\S+,?\\s+(?:call|use|invoke|run)\\s+\\S+)",
         HIGH,
-        "隐式工具投毒: 函数劫持 (ASR≈37%)",
-        "要求调用另一个工具。",
+        t("隐式工具投毒: 函数劫持 (ASR≈37%)", "Implicit tool poisoning: function hijacking (ASR≈37%)"),
+        t("要求调用另一个工具。", "Requests calling a different tool."),
     ),
     (
         "(?i)(?:before\\s+(?:any|each|every)\\s+(?:file|network|database|tool)\\s+(?:operation|action|call),?\\s+(?:first\\s+)?(?:read|send|upload|post|access))",
         CRIT,
-        "隐式工具投毒: 隐式触发器 (ASR≈27%)",
-        "在任意操作前插入前置动作。",
+        t("隐式工具投毒: 隐式触发器 (ASR≈27%)", "Implicit tool poisoning: implicit trigger (ASR≈27%)"),
+        t("在任意操作前插入前置动作。", "Inserts pre-action before any operation."),
     ),
     (
         "(?i)(?:this\\s+tool\\s+(?:has\\s+been\\s+)?(?:updated|changed|modified))",
         WARN,
-        "MCP Rug Pull 迹象",
-        "工具声称已修改行为。",
+        t("MCP Rug Pull 迹象", "MCP Rug Pull indicator"),
+        t("工具声称已修改行为。", "Tool claims modified behavior."),
     ),
     (
         "(?i)(?:(?:replaces?|supersedes?|overrides?|shadows?)\\s+(?:the\\s+)?(?:built-in|default|original|existing)\\s+\\S+\\s+tool)",
         HIGH,
-        "MCP 工具覆盖 (Tool Shadowing)",
-        "声称替代内置工具。",
+        t("MCP 工具覆盖 (Tool Shadowing)", "MCP Tool Shadowing"),
+        t("声称替代内置工具。", "Claims to replace a built-in tool."),
     ),
     (
         "(?i)(?:permission\\s+(?:from|granted\\s+by)\\s+(?:\\S+\\s+)?server)",
         WARN,
-        "MCP 跨域权限提升",
-        "声明来自另一服务器的权限。",
+        t("MCP 跨域权限提升", "MCP cross-origin privilege escalation"),
+        t("声明来自另一服务器的权限。", "Claims permissions from another server."),
     ),
 ]
 
@@ -1042,10 +1051,10 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                         Finding(
                             "mcp",
                             CRIT,
-                            f"MCP [{srv_name}] 绑定 0.0.0.0",
-                            "服务器对外网暴露。",
+                            t(f"MCP [{srv_name}] 绑定 0.0.0.0", f"MCP [{srv_name}] bound to 0.0.0.0"),
+                            t("服务器对外网暴露。", "Server exposed to external network."),
                             f"{cfg_path.name}:mcpServers.{srv_name}",
-                            remediation="改为 127.0.0.1。",
+                            remediation=t("改为 127.0.0.1。", "Change to 127.0.0.1."),
                         )
                     )
                 elif (
@@ -1057,10 +1066,10 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                         Finding(
                             "mcp",
                             WARN,
-                            f"MCP [{srv_name}] 连接远程端点",
-                            f"指向 {url[:60]}。",
+                            t(f"MCP [{srv_name}] 连接远程端点", f"MCP [{srv_name}] connects to remote endpoint"),
+                            t(f"指向 {url[:60]}。", f"Points to {url[:60]}."),
                             f"{cfg_path.name}:mcpServers.{srv_name}",
-                            remediation="确认可信度。",
+                            remediation=t("确认可信度。", "Verify trustworthiness."),
                         )
                     )
             for ek, ev in (env or {}).items():
@@ -1072,10 +1081,10 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                         Finding(
                             "mcp",
                             HIGH,
-                            f"MCP [{srv_name}] env 中含凭证",
-                            f"字段 {ek} 明文写入配置。",
+                            t(f"MCP [{srv_name}] env 中含凭证", f"MCP [{srv_name}] env contains credentials"),
+                            t(f"字段 {ek} 明文写入配置。", f"Field {ek} stored in plaintext in config."),
                             f"{cfg_path.name}:mcpServers.{srv_name}.env.{ek}",
-                            remediation="改用环境变量。",
+                            remediation=t("改用环境变量。", "Use environment variables instead."),
                         )
                     )
                 if ek.upper() in RISKY_ENV_VARS:
@@ -1083,10 +1092,10 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                         Finding(
                             "mcp",
                             HIGH,
-                            f"MCP [{srv_name}] env 含危险变量: {ek}",
-                            f"{ek} 可被利用注入恶意代码到 MCP 服务器进程。",
+                            t(f"MCP [{srv_name}] env 含危险变量: {ek}", f"MCP [{srv_name}] env has dangerous var: {ek}"),
+                            t(f"{ek} 可被利用注入恶意代码到 MCP 服务器进程。", f"{ek} can be exploited to inject malicious code into the MCP server process."),
                             f"{cfg_path.name}:mcpServers.{srv_name}.env.{ek}",
-                            remediation=f"移除 {ek}。",
+                            remediation=t(f"移除 {ek}。", f"Remove {ek}."),
                         )
                     )
             for tool in srv.get("tools", []):
@@ -1113,7 +1122,7 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                                     detail,
                                     f"{cfg_path.name}:tools[{tool.get('name', '?')}].{fn}",
                                     text[:120],
-                                    "审查该工具描述来源。",
+                                    t("审查该工具描述来源。", "Review the source of this tool description."),
                                 )
                             )
                             break
@@ -1137,16 +1146,16 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         for candidate in candidates:
             for pattern, level, title, detail in MALICIOUS_PATTERNS:
                 if re.search(pattern, candidate):
-                    suffix = " (反混淆后发现)" if candidate is not line else ""
+                    suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
                     findings.append(
                         Finding(
                             "skill_precheck",
                             level,
-                            f"[新 Skill: {skill_name}] {title}{suffix}",
+                            t(f"[新 Skill: {skill_name}] {title}{suffix}", f"[New Skill: {skill_name}] {title}{suffix}"),
                             detail,
                             f"SKILL.md:{i}",
                             line.strip()[:120],
-                            "安装前仔细审查来源和代码。",
+                            t("安装前仔细审查来源和代码。", "Carefully review the source and code before installing."),
                         )
                     )
                     break
@@ -1154,26 +1163,26 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         (
             "(?i)requires.*(?:sudo|root|admin)",
             HIGH,
-            "要求管理员权限",
-            "声明需要 sudo/root。",
+            t("要求管理员权限", "Requires admin privileges"),
+            t("声明需要 sudo/root。", "Declares need for sudo/root."),
         ),
         (
             "(?i)requires.*(?:full.?disk|全盘|所有文件)",
             HIGH,
-            "要求全盘访问",
-            "声明需要全盘文件访问。",
+            t("要求全盘访问", "Requires full disk access"),
+            t("声明需要全盘文件访问。", "Declares need for full disk file access."),
         ),
         (
             "(?i)bins.*(?:curl|wget|nc|netcat|nmap|ssh)",
             WARN,
-            "依赖网络工具",
-            "依赖网络工具二进制。",
+            t("依赖网络工具", "Depends on network tools"),
+            t("依赖网络工具二进制。", "Depends on network tool binaries."),
         ),
         (
             "(?i)(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)",
             HIGH,
-            "引用危险环境变量",
-            "SKILL.md 中引用了可注入代码的环境变量。",
+            t("引用危险环境变量", "References dangerous env var"),
+            t("SKILL.md 中引用了可注入代码的环境变量。", "SKILL.md references env vars that enable code injection."),
         ),
     ]:
         if re.search(pat, content):
@@ -1181,10 +1190,10 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
                 Finding(
                     "skill_precheck",
                     lv,
-                    f"[新 Skill: {skill_name}] {title}",
+                    t(f"[新 Skill: {skill_name}] {title}", f"[New Skill: {skill_name}] {title}"),
                     detail,
                     "SKILL.md:metadata",
-                    remediation="确认这些权限是否与功能匹配。",
+                    remediation=t("确认这些权限是否与功能匹配。", "Verify these permissions match the intended functionality."),
                 )
             )
     urls = re.findall("https?://[^\\s\\)>\"\\']+", content)
@@ -1199,9 +1208,9 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
                 Finding(
                     "skill_precheck",
                     WARN,
-                    f"[新 Skill: {skill_name}] 引用可疑域名",
+                    t(f"[新 Skill: {skill_name}] 引用可疑域名", f"[New Skill: {skill_name}] References suspicious domain"),
                     f"URL: {url[:80]}",
-                    remediation="确认域名可信度。",
+                    remediation=t("确认域名可信度。", "Verify domain trustworthiness."),
                 )
             )
     if re.search("[\\u200b\\u200c\\u200d\\ufeff\\u2060]", content):
@@ -1209,9 +1218,9 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
             Finding(
                 "skill_precheck",
                 HIGH,
-                f"[新 Skill: {skill_name}] 发现零宽字符",
-                "可能隐藏注入内容。",
-                remediation="使用十六进制编辑器检查。",
+                t(f"[新 Skill: {skill_name}] 发现零宽字符", f"[New Skill: {skill_name}] Zero-width characters found"),
+                t("可能隐藏注入内容。", "May hide injected content."),
+                remediation=t("使用十六进制编辑器检查。", "Inspect with a hex editor."),
             )
         )
     if len(content) > 50000:
@@ -1219,9 +1228,9 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
             Finding(
                 "skill_precheck",
                 WARN,
-                f"[新 Skill: {skill_name}] SKILL.md 异常过大",
-                f"文件 {len(content)} 字节。",
-                remediation="检查是否包含不必要的嵌入内容。",
+                t(f"[新 Skill: {skill_name}] SKILL.md 异常过大", f"[New Skill: {skill_name}] SKILL.md abnormally large"),
+                t(f"文件 {len(content)} 字节。", f"File is {len(content)} bytes."),
+                remediation=t("检查是否包含不必要的嵌入内容。", "Check for unnecessary embedded content."),
             )
         )
     is_safe = not any((f.level in (CRIT, HIGH) for f in findings))

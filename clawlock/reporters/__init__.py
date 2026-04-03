@@ -1,4 +1,4 @@
-"""ClawLock v1.3.0 report renderer - Rich terminal + JSON + HTML output."""
+"""ClawLock v1.4.0 report renderer - Rich terminal + JSON + HTML output."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from ..i18n import t
 from ..scanners import CRIT, HIGH, WARN, Finding
 
 console = Console()
@@ -25,32 +26,32 @@ console = Console()
 
 # Map scanner names → security domains for domain-level grading.
 _SCANNER_TO_DOMAIN: Dict[str, str] = {
-    "config": "配置安全",
-    "process": "运行时安全",
-    "credential": "凭据安全",
-    "skill": "供应链安全",
-    "skill_precheck": "供应链安全",
-    "soul": "提示词完整性",
-    "memory": "提示词完整性",
-    "mcp": "MCP 安全",
-    "mcp_itp": "MCP 安全",
-    "mcp_deep": "MCP 安全",
-    "cve": "漏洞管理",
-    "cost": "成本控制",
-    "agent_scan": "Agent 安全",
+    "config": t("配置安全", "Config Security"),
+    "process": t("运行时安全", "Runtime Security"),
+    "credential": t("凭据安全", "Credential Security"),
+    "skill": t("供应链安全", "Supply Chain Security"),
+    "skill_precheck": t("供应链安全", "Supply Chain Security"),
+    "soul": t("提示词完整性", "Prompt Integrity"),
+    "memory": t("提示词完整性", "Prompt Integrity"),
+    "mcp": t("MCP 安全", "MCP Security"),
+    "mcp_itp": t("MCP 安全", "MCP Security"),
+    "mcp_deep": t("MCP 安全", "MCP Security"),
+    "cve": t("漏洞管理", "Vulnerability Mgmt"),
+    "cost": t("成本控制", "Cost Control"),
+    "agent_scan": t("Agent 安全", "Agent Security"),
 }
 
 # All possible domains in display order, with weights.
 _DOMAIN_WEIGHTS: Dict[str, int] = {
-    "供应链安全": 24,
-    "MCP 安全": 18,
-    "漏洞管理": 18,
-    "配置安全": 17,
-    "凭据安全": 8,
-    "提示词完整性": 5,
-    "Agent 安全": 5,
-    "运行时安全": 5,
-    "成本控制": 0,
+    t("供应链安全", "Supply Chain Security"): 24,
+    t("MCP 安全", "MCP Security"): 18,
+    t("漏洞管理", "Vulnerability Mgmt"): 18,
+    t("配置安全", "Config Security"): 17,
+    t("凭据安全", "Credential Security"): 8,
+    t("提示词完整性", "Prompt Integrity"): 5,
+    t("Agent 安全", "Agent Security"): 5,
+    t("运行时安全", "Runtime Security"): 5,
+    t("成本控制", "Cost Control"): 0,
 }
 
 _ALL_DOMAINS = list(_DOMAIN_WEIGHTS.keys())
@@ -110,7 +111,7 @@ def _domain_score(findings: List[Finding], *, domain: str = "") -> int:
     if all(f.level not in (CRIT, HIGH, WARN) for f in findings):
         return 100
 
-    if domain == "漏洞管理":
+    if domain == t("漏洞管理", "Vulnerability Mgmt"):
         # CVE domain: determine effective severity from metadata.
         has_crit = any(
             (f.metadata.get("severity") if f.metadata else "") in ("critical",)
@@ -185,7 +186,7 @@ def _build_domain_report(
     """
     domain_findings: Dict[str, List[Finding]] = {d: [] for d in _ALL_DOMAINS}
     for f in all_findings:
-        domain = _SCANNER_TO_DOMAIN.get(f.scanner, "配置安全")
+        domain = _SCANNER_TO_DOMAIN.get(f.scanner, t("配置安全", "Config Security"))
         if domain in domain_findings:
             domain_findings[domain].append(f)
 
@@ -225,24 +226,24 @@ def _build_domain_report(
 
 def _level_badge(level: str) -> Text:
     if level in (CRIT, HIGH):
-        return Text("High", style="bold red")
+        return Text(t("高危", "High"), style="bold red")
     if level == WARN:
-        return Text("Warn", style="bold yellow")
-    return Text("Info", style="dim")
+        return Text(t("警告", "Warn"), style="bold yellow")
+    return Text(t("信息", "Info"), style="dim")
 
 
 def _status_icon(findings) -> str:
     if any(f.level in (CRIT, HIGH) for f in findings):
-        return "Risk"
+        return t("风险", "Risk")
     if any(f.level == WARN for f in findings):
-        return "Review"
-    return "Pass"
+        return t("待查", "Review")
+    return t("通过", "Pass")
 
 
 def _status_style(status: str) -> str:
-    if status == "Risk":
+    if status == t("风险", "Risk"):
         return "bold red"
-    if status == "Review":
+    if status == t("待查", "Review"):
         return "bold yellow"
     return "bold green"
 
@@ -255,7 +256,7 @@ def render_scan_report(
     output_path: Optional[str] = None,
 ):
     """Render scan results in text, JSON, or HTML."""
-    t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_f = [f for fs in all_findings_map.values() for f in fs]
     nc = sum(1 for f in all_f if f.level in (CRIT, HIGH))
     nw = sum(1 for f in all_f if f.level == WARN)
@@ -272,8 +273,8 @@ def render_scan_report(
     if output_format == "json":
         out = {
             "tool": "ClawLock",
-            "version": "1.3.0",
-            "time": t,
+            "version": "1.4.0",
+            "time": scan_time,
             "adapter": adapter_name,
             "device": dev_fp,
             "score": score,
@@ -295,7 +296,7 @@ def render_scan_report(
         text = json.dumps(out, ensure_ascii=False, indent=2)
         if output_path:
             Path(output_path).write_text(text, encoding="utf-8")
-            console.print(f"[green]Saved JSON report: {output_path}[/green]")
+            console.print(f"[green]{t('JSON 报告已保存', 'Saved JSON report')}: {output_path}[/green]")
         else:
             console.print_json(text)
         return
@@ -304,7 +305,7 @@ def render_scan_report(
         _render_html(
             adapter_name,
             adapter_version,
-            t,
+            scan_time,
             all_findings_map,
             output_path,
         )
@@ -313,30 +314,30 @@ def render_scan_report(
     console.print()
     console.print(
         Panel(
-            "[bold]ClawLock Security Report[/bold]",
-            subtitle=f"Time {t}  |  Adapter {adapter_name} {adapter_version}  |  Device {dev_fp}",
+            f"[bold]{t('ClawLock 安全报告', 'ClawLock Security Report')}[/bold]",
+            subtitle=f"{t('时间', 'Time')} {scan_time}  |  {t('适配器', 'Adapter')} {adapter_name} {adapter_version}  |  {t('设备', 'Device')} {dev_fp}",
             border_style="cyan",
         )
     )
     sc = "red" if score < 60 else ("yellow" if score < 80 else "green")
     og_style = _GRADE_STYLES.get(overall_grade, "bold red")
     console.print(
-        f"  Score [bold {sc}]{score}/100[/bold {sc}]"
-        f"  |  Grade [{og_style}]{overall_grade}[/{og_style}]"
-        f"  |  [red]High {nc}[/red]"
-        f"  |  [yellow]Warn {nw}[/yellow]"
+        f"  {t('分数', 'Score')} [bold {sc}]{score}/100[/bold {sc}]"
+        f"  |  {t('等级', 'Grade')} [{og_style}]{overall_grade}[/{og_style}]"
+        f"  |  [red]{t('高危', 'High')} {nc}[/red]"
+        f"  |  [yellow]{t('警告', 'Warn')} {nw}[/yellow]"
     )
     console.print()
 
     # Domain grading table
     grade_tbl = Table(
-        box=box.ROUNDED, show_header=True, header_style="bold cyan", title="Security Domains"
+        box=box.ROUNDED, show_header=True, header_style="bold cyan", title=t("安全域", "Security Domains")
     )
-    grade_tbl.add_column("Domain", min_width=16)
-    grade_tbl.add_column("Grade", min_width=8, justify="center")
-    grade_tbl.add_column("Score", min_width=8, justify="center")
-    grade_tbl.add_column("High", min_width=6, justify="center")
-    grade_tbl.add_column("Warn", min_width=6, justify="center")
+    grade_tbl.add_column(t("域", "Domain"), min_width=16)
+    grade_tbl.add_column(t("等级", "Grade"), min_width=8, justify="center")
+    grade_tbl.add_column(t("分数", "Score"), min_width=8, justify="center")
+    grade_tbl.add_column(t("高危", "High"), min_width=6, justify="center")
+    grade_tbl.add_column(t("警告", "Warn"), min_width=6, justify="center")
     for domain in _ALL_DOMAINS:
         g = domain_grades[domain]
         dfs = domain_findings[domain]
@@ -363,17 +364,17 @@ def render_scan_report(
 
     # Per-check summary table
     summary = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
-    summary.add_column("Check", min_width=14)
-    summary.add_column("Status", min_width=12)
-    summary.add_column("Summary", min_width=40)
+    summary.add_column(t("检查项", "Check"), min_width=14)
+    summary.add_column(t("状态", "Status"), min_width=12)
+    summary.add_column(t("摘要", "Summary"), min_width=40)
     for label, fs in all_findings_map.items():
-        status = _status_icon(fs) if fs else "Pass"
+        status = _status_icon(fs) if fs else t("通过", "Pass")
         high_count = len([f for f in fs if f.level in (CRIT, HIGH)])
         warn_count = len([f for f in fs if f.level == WARN])
         summary.add_row(
             label,
             Text(status, style=_status_style(status)),
-            f"{high_count} high, {warn_count} warn" if fs else "no issue found",
+            t(f"{high_count} 高危, {warn_count} 警告", f"{high_count} high, {warn_count} warn") if fs else t("未发现问题", "no issue found"),
         )
     console.print(summary)
     console.print()
@@ -383,29 +384,29 @@ def render_scan_report(
         step += 1
         if not fs:
             continue
-        console.print(f"[bold cyan]Step {step}: {label}[/bold cyan]")
+        console.print(f"[bold cyan]{t('步骤', 'Step')} {step}: {label}[/bold cyan]")
         tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold")
-        tbl.add_column("Level", min_width=10)
-        tbl.add_column("Finding", min_width=30)
-        tbl.add_column("Detail", min_width=40)
+        tbl.add_column(t("级别", "Level"), min_width=10)
+        tbl.add_column(t("发现", "Finding"), min_width=30)
+        tbl.add_column(t("详情", "Detail"), min_width=40)
         for f in fs:
             tbl.add_row(_level_badge(f.level), f.title[:60], f.detail[:80])
         console.print(tbl)
         for f in fs[:3]:
             if f.remediation:
-                console.print(f"  [dim]Fix: {f.remediation}[/dim]")
+                console.print(f"  [dim]{t('修复', 'Fix')}: {f.remediation}[/dim]")
         console.print()
 
     console.print(
         Panel(
-            "[dim]Generated by ClawLock v1.3.0. Static analysis reflects the currently visible code and config only.[/dim]",
+            f"[dim]{t('由 ClawLock v1.4.0 生成。静态分析仅反映当前可见的代码和配置。', 'Generated by ClawLock v1.4.0. Static analysis reflects the currently visible code and config only.')}[/dim]",
             border_style="dim",
         )
     )
 
 
 def _render_html(
-    adapter_name, adapter_version, t, all_findings_map, output_path
+    adapter_name, adapter_version, scan_time, all_findings_map, output_path
 ):
     """Generate a standalone HTML report."""
     all_f = [f for fs in all_findings_map.values() for f in fs]
@@ -455,9 +456,9 @@ def _render_html(
                 else ("#ef9f27" if f.level == WARN else "#888")
             )
             lv_text = (
-                "High"
+                t("高危", "High")
                 if f.level in (CRIT, HIGH)
-                else ("Warn" if f.level == WARN else "Info")
+                else (t("警告", "Warn") if f.level == WARN else t("信息", "Info"))
             )
             rows += (
                 "<tr>"
@@ -466,7 +467,23 @@ def _render_html(
                 f'<td><b>{html_mod.escape(f.title[:80])}</b><br><span style="color:#666;font-size:13px">{html_mod.escape(f.detail[:120])}</span></td>'
                 f'<td style="font-size:13px">{html_mod.escape(f.remediation[:100])}</td></tr>\n'
             )
-    html_content = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>ClawLock Security Report</title>
+    _title = t("ClawLock 安全报告", "ClawLock Security Report")
+    _lbl_time = t("时间", "Time")
+    _lbl_adapter = t("适配器", "Adapter")
+    _lbl_score = t("分数", "Score")
+    _lbl_grade = t("等级", "Grade")
+    _lbl_high = t("高危", "High")
+    _lbl_warn = t("警告", "Warn")
+    _lbl_domains = t("安全域", "Security Domains")
+    _lbl_domain = t("域", "Domain")
+    _lbl_findings = t("发现", "Findings")
+    _lbl_level = t("级别", "Level")
+    _lbl_check = t("检查项", "Check")
+    _lbl_finding = t("发现", "Finding")
+    _lbl_fix = t("修复", "Fix")
+    _footer1 = t("由 ClawLock v1.4.0 生成", "Generated by ClawLock v1.4.0")
+    _footer2 = t("静态分析仅反映当前可见的代码和配置。", "Static analysis reflects the currently visible code and config only.")
+    html_content = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{_title}</title>
 <style>body{{font-family:-apple-system,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;color:#333;background:#fafaf8}}
 h1{{color:#222;border-bottom:2px solid #ddd;padding-bottom:12px}}
 .score{{display:inline-block;font-size:36px;font-weight:700;color:{sc};margin:8px 0}}
@@ -477,23 +494,23 @@ td{{padding:10px;border-bottom:1px solid #eee;vertical-align:top}}
 tr:hover{{background:#f9f9f4}}
 .footer{{margin-top:40px;padding:16px;background:#f5f5f0;border-radius:8px;font-size:13px;color:#888;text-align:center}}
 </style></head><body>
-<h1>ClawLock Security Report</h1>
-<p class="meta">Time {t} &nbsp; Adapter {adapter_name} {adapter_version}</p>
-<p>Score <span class="score">{score}/100</span> &nbsp;
-Grade <span style="display:inline-block;font-size:36px;font-weight:700;color:{og_color}">{overall_grade}</span> &nbsp;
-High {nc} &nbsp; Warn {nw}</p>
+<h1>{_title}</h1>
+<p class="meta">{_lbl_time} {scan_time} &nbsp; {_lbl_adapter} {adapter_name} {adapter_version}</p>
+<p>{_lbl_score} <span class="score">{score}/100</span> &nbsp;
+{_lbl_grade} <span style="display:inline-block;font-size:36px;font-weight:700;color:{og_color}">{overall_grade}</span> &nbsp;
+{_lbl_high} {nc} &nbsp; {_lbl_warn} {nw}</p>
 {cap_notice}
-<h2 style="margin-top:32px">Security Domains</h2>
-<table><thead><tr><th>Domain</th><th style="width:80px;text-align:center">Grade</th><th style="width:80px;text-align:center">Score</th><th style="width:60px;text-align:center">High</th><th style="width:60px;text-align:center">Warn</th></tr></thead>
+<h2 style="margin-top:32px">{_lbl_domains}</h2>
+<table><thead><tr><th>{_lbl_domain}</th><th style="width:80px;text-align:center">{_lbl_grade}</th><th style="width:80px;text-align:center">{_lbl_score}</th><th style="width:60px;text-align:center">{_lbl_high}</th><th style="width:60px;text-align:center">{_lbl_warn}</th></tr></thead>
 <tbody>{domain_rows}</tbody></table>
-<h2 style="margin-top:32px">Findings</h2>
-<table><thead><tr><th style="width:80px">Level</th><th style="width:120px">Check</th><th>Finding</th><th style="width:200px">Fix</th></tr></thead>
+<h2 style="margin-top:32px">{_lbl_findings}</h2>
+<table><thead><tr><th style="width:80px">{_lbl_level}</th><th style="width:120px">{_lbl_check}</th><th>{_lbl_finding}</th><th style="width:200px">{_lbl_fix}</th></tr></thead>
 <tbody>{rows}</tbody></table>
-<div class="footer">Generated by ClawLock v1.3.0 | <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
-Static analysis reflects the currently visible code and config only.</div></body></html>"""
+<div class="footer">{_footer1} | <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
+{_footer2}</div></body></html>"""
     out = Path(output_path or "clawlock-report.html")
     out.write_text(html_content, encoding="utf-8")
-    console.print(f"[green]Saved HTML report: {out.absolute()}[/green]")
+    console.print(f"[green]{t('HTML 报告已保存', 'Saved HTML report')}: {out.absolute()}[/green]")
     import webbrowser
 
     try:

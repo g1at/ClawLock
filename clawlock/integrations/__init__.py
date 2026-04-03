@@ -1,5 +1,5 @@
 """
-ClawLock v1.3.0 integrations — cloud intelligence, cost analysis,
+ClawLock v1.4.0 integrations — cloud intelligence, cost analysis,
 external scanner, and Agent-Scan.
 """
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 import httpx
 from ..scanners import Finding, CRIT, WARN, INFO
+from ..i18n import t
 
 CLOUD_BASE = os.environ.get("CLAWLOCK_CLOUD_URL", "https://matrix.tencent.com/clawscan")
 _TIMEOUT = 30.0
@@ -62,9 +63,9 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
             r.raise_for_status()
             data = r.json()
     except httpx.TimeoutException:
-        return [Finding("cve", INFO, "CVE 情报查询超时", "建议稍后重试。")]
+        return [Finding("cve", INFO, t("CVE 情报查询超时", "CVE intelligence query timed out"), t("建议稍后重试。", "Please retry later."))]
     except Exception as e:
-        return [Finding("cve", INFO, "CVE 情报暂不可用", f"{str(e)[:100]}")]
+        return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"{str(e)[:100]}")]
     advisories = (
         data if isinstance(data, list) else data.get("data", data.get("advisories", []))
     )
@@ -75,7 +76,7 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
         sev = str(info.get("severity", "medium")).lower()
         title = info.get("summary", info.get("title", cve_id))
         desc = info.get("details", info.get("description", ""))[:200]
-        remediation = info.get("security_advise", "升级到最新版本。")
+        remediation = info.get("security_advise", t("升级到最新版本。", "Upgrade to the latest version."))
 
         # Skip CVEs already fixed in the current version.
         if version:
@@ -85,9 +86,9 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
                     Finding(
                         "cve",
                         INFO,
-                        f"[{cve_id}] (已修复) {title}",
-                        f"当前版本 {version} >= 修复版本 {fixed_ver}，该漏洞已不受影响。",
-                        remediation="无需操作。",
+                        f"[{cve_id}] {t('(已修复)', '(Fixed)')} {title}",
+                        t(f"当前版本 {version} >= 修复版本 {fixed_ver}，该漏洞已不受影响。", f"Current version {version} >= fix version {fixed_ver}, this vulnerability no longer applies."),
+                        remediation=t("无需操作。", "No action needed."),
                         metadata={"cve_id": cve_id, "severity": sev, "fixed_version": fixed_ver},
                     )
                 )
@@ -126,9 +127,9 @@ def verdict_to_finding(skill_name: str, intel: dict) -> Optional[Finding]:
     return Finding(
         "skill_intel",
         CRIT if verdict == "malicious" else WARN,
-        f"[{skill_name}] 云端情报: {('已知恶意' if verdict == 'malicious' else '存在风险')}",
+        f"[{skill_name}] {t('云端情报:', 'Cloud intelligence:')} {(t('已知恶意', 'Known malicious') if verdict == 'malicious' else t('存在风险', 'Risky'))}",
         intel.get("reason", f"verdict: {verdict}"),
-        remediation="立即卸载。" if verdict == "malicious" else "确认来源可信后使用。",
+        remediation=t("立即卸载。", "Uninstall immediately.") if verdict == "malicious" else t("确认来源可信后使用。", "Verify source trustworthiness before use."),
     )
 
 
@@ -160,10 +161,10 @@ def analyze_cost(config: dict, cfg_path: str = "") -> list[Finding]:
                     Finding(
                         "cost",
                         WARN,
-                        f"使用高价模型: {model}",
-                        f"当前默认模型 {model} 费用较高。对于简单任务，考虑使用 mini/haiku 变体。",
+                        t(f"使用高价模型: {model}", f"Using expensive model: {model}"),
+                        t(f"当前默认模型 {model} 费用较高。对于简单任务，考虑使用 mini/haiku 变体。", f"Default model {model} is expensive. For simple tasks, consider mini/haiku variants."),
                         "config:model",
-                        remediation="根据任务复杂度选择合适的模型级别。",
+                        remediation=t("根据任务复杂度选择合适的模型级别。", "Choose model tier based on task complexity."),
                     )
                 )
                 break
@@ -175,9 +176,9 @@ def analyze_cost(config: dict, cfg_path: str = "") -> list[Finding]:
                 Finding(
                     "cost",
                     WARN,
-                    "心跳/定时任务频率过高",
-                    f"心跳间隔 {interval}秒，高频调用会持续消耗 API 额度。",
-                    remediation="将心跳间隔设为 300 秒（5分钟）以上。",
+                    t("心跳/定时任务频率过高", "Heartbeat/cron frequency too high"),
+                    t(f"心跳间隔 {interval}秒，高频调用会持续消耗 API 额度。", f"Heartbeat interval {interval}s — high-frequency calls continuously consume API quota."),
+                    remediation=t("将心跳间隔设为 300 秒（5分钟）以上。", "Set heartbeat interval to 300+ seconds (5 min)."),
                 )
             )
     max_tokens = config.get("maxTokens", config.get("max_tokens", 0))
@@ -186,9 +187,9 @@ def analyze_cost(config: dict, cfg_path: str = "") -> list[Finding]:
             Finding(
                 "cost",
                 INFO,
-                f"最大 Token 数较高: {max_tokens}",
-                "较高的 max_tokens 值在每次请求中消耗更多额度。",
-                remediation="根据实际需要调整 maxTokens 值。",
+                t(f"最大 Token 数较高: {max_tokens}", f"Max tokens is high: {max_tokens}"),
+                t("较高的 max_tokens 值在每次请求中消耗更多额度。", "High max_tokens value consumes more quota per request."),
+                remediation=t("根据实际需要调整 maxTokens 值。", "Adjust maxTokens based on actual needs."),
             )
         )
     return findings
@@ -228,8 +229,8 @@ def run_mcp_deep_scan(
                 Finding(
                     "mcp_deep",
                     INFO,
-                    "ai-infra-guard 增强扫描结果 (ReAct agent 语义分析)",
-                    f"以下 {len(ext_findings)} 项由外部扫描器补充。",
+                    t("ai-infra-guard 增强扫描结果 (ReAct agent 语义分析)", "ai-infra-guard enhanced scan results (ReAct agent semantic analysis)"),
+                    t(f"以下 {len(ext_findings)} 项由外部扫描器补充。", f"The following {len(ext_findings)} items were supplemented by external scanner."),
                 )
             )
             findings.extend(ext_findings)

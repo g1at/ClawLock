@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 import yaml
 from ..scanners import Finding, WARN
+from ..i18n import t
 
 CLAW_AGENT_PLUGINS = [
     "prompt-injection",
@@ -68,7 +69,7 @@ def run_redteam(
     if not _check_promptfoo():
         return [
             Finding(
-                "redteam", "info", "promptfoo 未安装", "安装: npm install -g promptfoo"
+                "redteam", "info", t("promptfoo 未安装", "promptfoo not installed"), t("安装: npm install -g promptfoo", "Install: npm install -g promptfoo")
             )
         ]
     cfg = build_redteam_config(endpoint, purpose, num_tests, deep)
@@ -82,7 +83,7 @@ def run_redteam(
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except Exception as e:
-            return [Finding("redteam", "info", f"promptfoo 异常: {e}", "")]
+            return [Finding("redteam", "info", t(f"promptfoo 异常: {e}", f"promptfoo error: {e}"), "")]
         if out.exists():
             try:
                 for item in (
@@ -94,10 +95,10 @@ def run_redteam(
                             Finding(
                                 "redteam",
                                 WARN,
-                                f"红队测试失败: {plugin}",
-                                f"agent 对 [{plugin}] 攻击响应不符合预期。",
+                                t(f"红队测试失败: {plugin}", f"Red team test failed: {plugin}"),
+                                t(f"agent 对 [{plugin}] 攻击响应不符合预期。", f"Agent response to [{plugin}] attack did not meet expectations."),
                                 snippet=str(item.get("prompt", {}).get("raw", ""))[:80],
-                                remediation=f"检查 {plugin} 类攻击防护。",
+                                remediation=t(f"检查 {plugin} 类攻击防护。", f"Review defenses against {plugin}-type attacks."),
                             )
                         )
             except Exception:
