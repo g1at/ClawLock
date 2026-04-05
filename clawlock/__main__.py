@@ -1,7 +1,5 @@
 """ClawLock v2.0.0 CLI - 12 commands."""
 
-from __future__ import annotations
-
 import asyncio
 import concurrent.futures
 import json
