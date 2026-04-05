@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Union
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,7 +12,7 @@ from ..i18n import t
 from ..utils import IS_ANDROID, IS_MACOS, IS_WINDOWS, platform_label
 
 console = Console()
-TextValue = str | Callable[[], str]
+TextValue = Union[str, Callable[[], str]]
 
 
 @dataclass
