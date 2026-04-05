@@ -93,6 +93,28 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("MCP Server 代码中包含 shell 执行调用，需审查是否接受用户输入。", "MCP server code contains shell execution calls; review whether user input is accepted."),
         t("确保 shell 调用不拼接用户输入；使用 argv 数组传参。", "Ensure shell calls do not concatenate user input; pass arguments via argv array."),
     ),
+    McpPattern(
+        "DEPVL",
+        HIGH,
+        re.compile(
+            r"(?:npm|pnpm|yarn|pip|uv|poetry)\s+install\b|pip\s+install\s+git\+https?://|(?:npx|uvx|pipx\s+run|npm\s+exec)\b",
+            re.I,
+        ),
+        t("运行时拉取并执行依赖", "Runtime dependency fetch and execution"),
+        t("源码中包含运行时安装或执行外部依赖的逻辑，存在供应链攻击面。", "Source code installs or executes external dependencies at runtime, creating supply-chain risk."),
+        t("将依赖固定在构建阶段安装，并锁定版本来源。", "Install dependencies during build time and lock their versions and sources."),
+    ),
+    McpPattern(
+        "RCE",
+        HIGH,
+        re.compile(
+            r"(?:importlib\.import_module|__import__|require)\s*\([^)]*(?:req\.|params\.|args\.|input\.|body\.|tool_input|plugin|module)",
+            re.I,
+        ),
+        t("用户输入控制动态模块加载", "User input controls dynamic module loading"),
+        t("模块名/插件名可能由用户输入决定，可导致加载任意代码。", "Module or plugin name may be controlled by user input, enabling arbitrary code loading."),
+        t("仅允许从固定白名单中加载模块或插件。", "Only load modules or plugins from a fixed allowlist."),
+    ),
     # ── SSRF ──
     McpPattern(
         "SSRF",
@@ -184,6 +206,17 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("路由处理器直接接受请求，未经过认证/授权中间件。", "Route handler accepts requests directly without authentication/authorization middleware."),
         t("在路由或全局层添加认证中间件。", "Add authentication middleware at the route or global level."),
     ),
+    McpPattern(
+        "AUTHZ",
+        HIGH,
+        re.compile(
+            r'(?:app\.(?:get|post|all)|router\.(?:get|post|use))\s*\(\s*["\']/(?:tools?|invoke|call)(?:/[^"\']*)?["\']\s*,\s*(?:async\s+)?\(?\s*(?:req|ctx)\b',
+            re.I,
+        ),
+        t("公开暴露 MCP 工具调用路由", "Publicly exposed MCP tool invocation route"),
+        t("检测到 /tools、/invoke 或 /call 等工具调用路由直接对外暴露。", "Detected a public /tools, /invoke, or /call style route exposed directly."),
+        t("仅在经过鉴权后暴露工具调用路由。", "Expose tool invocation routes only after authentication and authorization."),
+    ),
     # ── Prompt Injection Surface ──
     McpPattern(
         "PRMTI",
@@ -206,6 +239,17 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("系统提示词包含用户输入", "System prompt contains user input"),
         t("将用户可控数据拼入系统提示词，存在间接提示词注入风险。", "User-controllable data concatenated into system prompt, creating indirect prompt injection risk."),
         t("严格分离系统指令和用户输入。", "Strictly separate system instructions from user input."),
+    ),
+    McpPattern(
+        "PRMTI",
+        HIGH,
+        re.compile(
+            r"(?:prompt|system_prompt|system_message|instructions?|description)\s*[:=]\s*[^;\n]*(?:tool_output|stdout|response(?:\.text)?|result(?:\.content)?)",
+            re.I,
+        ),
+        t("工具输出直接拼入提示词或描述", "Tool output fed directly into prompts or descriptions"),
+        t("将工具输出直接拼接到提示词或描述中，存在间接提示词注入风险。", "Tool output is concatenated directly into prompts or descriptions, creating indirect prompt injection risk."),
+        t("对工具输出做净化，并与系统提示词严格隔离。", "Sanitize tool output and keep it isolated from system prompts."),
     ),
     # ── Tool Description Poisoning ──
     McpPattern(
@@ -266,6 +310,17 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("CORS 配置过于宽松", "CORS configuration too permissive"),
         t("允许所有来源的 CORS 请求 + 携带凭证。", "Allows CORS requests from all origins with credentials."),
         t("配置具体的 origin 白名单。", "Configure a specific origin whitelist."),
+    ),
+    McpPattern(
+        "CONFG",
+        HIGH,
+        re.compile(
+            r'Access-Control-Allow-Origin\s*[:=]\s*["\']\*["\']|Access-Control-Allow-Credentials\s*[:=]\s*true',
+            re.I,
+        ),
+        t("响应头显式放宽跨域访问", "Response headers explicitly relax cross-origin access"),
+        t("源码中显式设置了宽松的 CORS 响应头，可能允许跨站工具调用。", "Source code explicitly sets permissive CORS response headers, potentially allowing cross-site tool invocation."),
+        t("限制允许的来源，并避免在通配符下允许凭证。", "Restrict allowed origins and avoid allowing credentials with wildcard origins."),
     ),
     McpPattern(
         "CONFG",
@@ -345,6 +400,8 @@ _DANGEROUS_SINKS = {
     "subprocess.Popen": ("CMDI", HIGH),
     "eval": ("RCE", CRIT),
     "exec": ("RCE", CRIT),
+    "importlib.import_module": ("RCE", HIGH),
+    "__import__": ("RCE", HIGH),
     "open": ("LFI", HIGH),
     "Path": ("LFI", WARN),
     "pickle.loads": ("DESER", HIGH),

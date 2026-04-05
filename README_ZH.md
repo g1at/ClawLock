@@ -1,156 +1,220 @@
-# 🔒 ClawLock
+# ClawLock
 
 [![PyPI](https://img.shields.io/pypi/v/clawlock.svg)](https://pypi.org/project/clawlock/)
 [![License](https://img.shields.io/badge/License-Apache_2.0_OR_MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-59%2F59-brightgreen.svg)]()
-[![Platform](https://img.shields.io/badge/平台-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-lightgrey.svg)]()
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android%20(Termux)-lightgrey.svg)]()
 
-**ClawLock** 是一个综合安全扫描、红队测试与加固工具，覆盖 Claw 家族全平台：**OpenClaw**、**ZeroClaw**、**Claude Code** 及兼容产品——原生支持 **Linux**、**macOS**、**Windows** 和 **Android (Termux)**。
+**ClawLock** 是一个面向 Claw 家族 AI Agent 部署环境的安全扫描、加固、MCP 源码审计与 OWASP ASI Agent 扫描工具，支持 **OpenClaw**、**ZeroClaw**、**Claude Code** 以及兼容环境。
 
-面向安全团队和个人开发者——一条命令安装，秒级扫描，交互式加固。
+它同时面向专业安全人员和日常使用者：
 
-## 核心亮点
+- 以本地静态分析为主
+- 可选接入在线 CVE / skill 情报
+- 可选接入外部工具或 LLM 做更深层分析
 
-- **75+ 条检测规则**，覆盖 9 步扫描：配置审计、供应链、Prompt 注入、MCP 工具投毒、CVE、凭证审计、成本分析等
-- **安全评分体系** — 9 大安全域加权评分（S/A/B/C/D 等级），指数衰减算法，CVE 严重级别感知，自身配置高危自动封顶 59 分
-- **Shell 命令反混淆** — 递归解包 `sh -c`、`bash -c`、`cmd /c`、`powershell -c` 嵌套命令后再进行模式匹配
-- **内建 MCP 深度扫描引擎** — 28+ 模式覆盖 14 个风险类别 + Python AST 污点追踪，零外部依赖
-- **内建 OWASP ASI 14 Agent-Scan** — 3 层检测架构（配置分析 + 代码模式 + 可选 LLM 语义评估）
-- **12 个 CLI 命令** — 从全量扫描到单 Skill 审计
-- **4 个平台适配器** — 自动识别 OpenClaw / ZeroClaw / Claude Code，或回退到通用模式
-- **全平台兼容** — 在 Linux、macOS、Windows、Android (Termux) 上无需额外配置即可运行
-- **交互式加固** — 影响功能的操作带 UX 影响声明，需要用户明确确认
-- **零必须依赖** — 只需要 Python，开箱即用
+## 核心特性
+
+- **12 个 CLI 命令**，覆盖全量扫描、单 skill 审计、加固、历史、监控、MCP 扫描和 Agent-Scan
+- **`clawlock scan` 的 7 个核心阶段并发执行**，外加一个可选红队阶段
+- **内建 MCP 深度扫描引擎**，基于正则和 AST，覆盖 14 个风险类别
+- **内建 OWASP ASI 14 Agent-Scan**，支持配置检查、代码扫描和可选 LLM 语义分析
+- **18 项交互式加固措施**，支持按平台过滤，并明确标注 UX 影响
+- **支持 text / json / html 报告**，其中 HTML 适用于全量 `scan`
+- **全局命令行语言自适应**：
+  `CLAWLOCK_LANG=zh` 输出中文，其他情况输出英文
+- **跨平台运行**：Linux、macOS、Windows、Android (Termux)
 
 ## 快速开始
 
 ```bash
 pip install clawlock
 
-clawlock scan                              # 全面 9 步安全扫描
-clawlock discover                          # 发现系统上所有 Claw 安装实例
-clawlock precheck ./new-skill/SKILL.md     # 导入新 Skill 前预检
-clawlock skill /path/to/skill              # 审计单个 Skill
-clawlock soul                              # SOUL.md + 记忆文件 Drift 检测
-clawlock harden --auto-fix                 # 交互式加固（自动修复安全项）
-clawlock mcp-scan ./mcp-server/src         # MCP 源码深度扫描 + 依赖清单 CVE 检查
-clawlock agent-scan --code ./agent/src     # Agent 安全扫描 + 依赖清单风险检查
-clawlock scan --format html -o report.html # 输出 HTML 报告
+clawlock --help                           # 查看命令帮助
+clawlock scan                            # 全量安全扫描
+clawlock discover                        # 发现本地 Claw 安装
+clawlock precheck ./new-skill/SKILL.md   # 导入前预检 skill
+clawlock skill /path/to/skill            # 审计单个 skill
+clawlock soul                            # 检查 prompt / memory 漂移
+clawlock harden                          # 交互式加固向导
+clawlock harden --auto-fix               # 自动应用安全本地修复
+clawlock mcp-scan ./mcp-server/src       # MCP 源码深度扫描
+clawlock agent-scan --code ./agent/src   # OWASP ASI Agent 扫描
+clawlock scan --format html -o report.html
+```
+
+查看命令列表请使用 `clawlock --help`。
+
+## CLI 语言规则
+
+ClawLock 当前采用一条统一规则：
+
+- `CLAWLOCK_LANG=zh`：输出中文
+- 其他任意值，或未设置：输出英文
+
+这条规则会影响：
+
+- `--help`
+- 运行时进度提示和摘要
+- 加固向导输出
+- `scan / skill / precheck / soul / redteam / mcp-scan / agent-scan` 的文本输出
+
+## 报告格式与退出模式
+
+ClawLock 为不同使用场景提供 3 种报告格式：
+
+| 格式 | 适用场景 | 说明 |
+|------|----------|------|
+| `text` | 本地终端查看 | 默认格式，适合安全人员直接阅读 |
+| `json` | 自动化、CI、skill 与二次处理 | 适合被其他系统稳定消费 |
+| `html` | 审计归档、复核与分享 | `scan` 会生成独立 HTML 文件；即使浏览器无法自动打开，也会明确打印保存路径 |
+
+`scan` 同时提供两种执行模式：
+
+| 模式 | 行为 | 适用场景 |
+|------|------|----------|
+| `monitor` | 只报告，不因发现问题而让本次运行失败 | 人工复核、探索性检查 |
+| `enforce` | 发现严重/高危问题时返回退出码 `1` | CI 安全门禁与自动化执行 |
+
+示例：
+
+```bash
+clawlock scan --format text
+clawlock scan --format json --mode enforce -o report.json
+clawlock scan --format html -o report.html
 ```
 
 ## 扫描管线
 
+`clawlock scan` 会并发执行 7 个核心阶段，然后按条件追加一个红队阶段。
+
 | 步骤 | 检查项 | 说明 |
 |------|--------|------|
-| 1 | 配置审计 + 危险环境变量 | 按适配器检查配置 + NODE_OPTIONS/LD_PRELOAD 等 |
-| 2 | 进程检测 + 端口暴露 | 运行中的 Claw 进程 + 0.0.0.0 监听检测 |
-| 3 | 凭证目录权限审计 | 凭证文件和目录的访问权限检查 |
-| 4 | Skill 供应链 (46 模式) | 反弹 Shell、凭证外传、Prompt 注入、DNS 外传、零宽字符 + Shell 反混淆 |
-| 5 | 提示词 + 记忆文件 Drift | SOUL/CLAUDE/HEARTBEAT/MEMORY.md 的 SHA-256 基准对比 |
-| 6 | MCP 暴露面 + 6 种工具投毒 | 参数篡改、函数劫持、Rug Pull、Tool Shadowing |
-| 7 | CVE 漏洞匹配 | 云端漏洞情报库（589+ CVEs，43 个 AI 框架） |
-| 8 | 成本分析 | 高价模型、高频心跳、过大的 Token 限制 |
-| 9 | LLM 红队测试（可选） | 9 插件 × 8 策略 |
+| 1 | 配置审计 | 按适配器检查配置，并检查高风险环境变量 |
+| 2 | 进程暴露 | 检查运行中的进程和暴露监听 |
+| 3 | 凭证审计 | 检查凭证文件与目录权限 |
+| 4 | Skill 供应链 | 本地规则检测危险 skill 与安装逻辑 |
+| 5 | Prompt 与记忆 | 检查 SOUL / prompt 漂移与 memory 文件 |
+| 6 | MCP 暴露面 | 检查 MCP 配置与 poisoning 面 |
+| 7 | CVE 匹配 | 默认启用腾讯在线 CVE 情报查询，可用 `--no-cve` 关闭 |
+| 8 | 红队测试（可选） | 仅在传入 `--endpoint` 且未设置 `--no-redteam` 时运行 |
 
-## 依赖架构：三层设计
+## 依赖模型
 
-ClawLock 的设计理念很明确：**绝大多数用户只需 `pip install clawlock` 就够了**。高级能力面向专业用户，通过安装可选工具解锁。
+### 1. 内建本地引擎
 
-### 第一层：零依赖（覆盖 90%+ 使用场景）
+只需要：
 
-以下所有功能仅需 `pip install clawlock`——不需要 Node.js、不需要外部二进制、不需要 API key：
+```bash
+pip install clawlock
+```
 
-- 完整 9 步扫描（配置、进程、凭证、供应链、SOUL.md drift、MCP 暴露面、CVE、成本）
-- MCP Server 源码深度扫描（`clawlock mcp-scan`）— 内建 Python 正则 + AST 污点追踪 + 依赖清单风险检查
-- OWASP ASI 14 Agent-Scan（`clawlock agent-scan --code`）— 内建静态配置 + 代码模式 + 依赖清单风险分析
-- Skill 审计、预检、加固、安装发现、扫描历史、持续监控
-- React/Next 依赖 CVE 检查已并入代码扫描
+不需要 Node.js、不需要外部扫描器二进制，也不需要 LLM API key，即可使用：
 
-### 第二层：LLM 增强（仅需 API key）
+- 除在线 CVE 外的本地全量扫描能力
+- skill 审计与导入前预检
+- prompt / memory 漂移检查
+- 加固
+- 历史记录与 watch 模式
+- MCP 深度扫描
+- Agent-Scan 的配置层与代码层
 
-配置 Anthropic 或 OpenAI 的 API key 后，可在内建引擎基础上叠加语义级分析：
+### 2. 无 API key 的在线情报
+
+以下功能需要联网，但不需要用户提供 API key：
+
+- `scan` 默认启用的腾讯 CVE 情报查询
+- `clawlock skill` 中可选的 skill 云端情报
+
+如果你想要完全本地运行，可以这样：
+
+```bash
+clawlock scan --no-cve --no-redteam
+clawlock skill /path/to/skill --no-cloud
+```
+
+### 3. LLM 增强分析
+
+`agent-scan` 可以叠加 Anthropic 或 OpenAI 兼容接口的语义分析层：
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-clawlock agent-scan --code ./src --llm           # 叠加 LLM 语义评估层
+clawlock agent-scan --code ./src --llm
 ```
 
-不需要任何外部二进制——ClawLock 通过 Python 直接调用 LLM API。
+### 4. 可选外部工具
 
-### 第三层：专业增强（可选外部工具）
+ClawLock 可以与外部工具协作，但只在代码实际接入的路径中使用它们：
 
-安全专业人员如需最大化覆盖，可以安装以下两个优秀的开源项目来增强 ClawLock 的能力。**ClawLock 会自动检测它们的存在并使用——无需额外配置。**
+| 工具 | 当前在 ClawLock 中的接入方式 | 何时使用 |
+|------|------------------------------|----------|
+| [promptfoo](https://github.com/promptfoo/promptfoo) | `clawlock redteam` / 可选红队阶段 | 对在线端点执行红队测试时；ClawLock 可直接调用 `promptfoo`，也可通过 `npx` 间接运行 |
+| [AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard) | `clawlock mcp-scan` 的可选增强层 | 仅当本机已安装该二进制，且同时提供 `--model` 与 `--token` 时 |
 
-| 工具 | 增强内容 | 安装方式 | 适用场景 |
-|------|---------|---------|---------|
-| **[promptfoo](https://github.com/promptfoo/promptfoo)** | LLM 红队测试：50+ 漏洞插件，自适应越狱攻击（树搜索、渐进升级、多轮对话），OWASP/NIST/MITRE 合规映射，可视化攻击面板 | `npm install -g promptfoo` | 需要对在线 Agent 端点做系统性红队测试，覆盖全面的攻击手法 |
-| **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)** | ReAct agent 驱动的 MCP 代码分析（跨函数语义推理、多语言支持），6 子 agent 协作 Agent-Scan，多轮对话式攻击模拟 | [下载二进制](https://github.com/Tencent/AI-Infra-Guard/releases) | 需要 LLM 驱动的深度语义分析，超越模式匹配的 MCP Server 代码审计 |
+当前 **`agent-scan` 不会调用 AI-Infra-Guard**；它使用的是 ClawLock 自带引擎，以及可选的直接 LLM 分析层。
 
-**工作原理：** 运行 `mcp-scan` 或 `agent-scan` 时，内建引擎始终先执行，其中也包含本地 `package.json` 依赖清单检查，例如 React2Shell。若系统中安装了 `ai-infra-guard` 且通过 `--model`/`--token` 提供了 LLM API 凭证，ClawLock 会自动将其作为增强层调用，把结果追加到内建引擎的输出中。`clawlock redteam` 同理，有 `promptfoo` 就用，没有就提示安装。不需要特殊标志——安装工具即可使用。
+## 命令总览
 
-### 内建引擎 vs 外部工具有什么区别？
+| 命令 | 用途 |
+|------|------|
+| `scan` | 执行全量安全扫描 |
+| `discover` | 发现本地 Claw 安装 |
+| `skill` | 审计单个 skill |
+| `precheck` | 导入前预检新 skill |
+| `soul` | 检查 prompt 与 memory 漂移 |
+| `harden` | 运行交互式加固向导 |
+| `redteam` | 运行 promptfoo 红队测试 |
+| `mcp-scan` | 深度扫描 MCP 服务端源码 |
+| `agent-scan` | 运行 OWASP ASI Agent 扫描 |
+| `history` | 查看最近扫描历史 |
+| `watch` | 持续监控关键检查项变化 |
+| `version` | 显示版本信息 |
 
-| 维度 | ClawLock 内建 | + AI-Infra-Guard | + promptfoo |
-|------|:-:|:-:|:-:|
-| **成本** | 免费 | LLM API 费用 | LLM API 费用 |
-| **速度** | <1 秒 | 5-15 分钟 | 5-15 分钟 |
-| **确定性** | 100% 可复现 | 非确定性 (LLM) | 非确定性 (LLM) |
-| **语言覆盖** | Python + JS/TS | 任何语言 | 不涉及（测试端点） |
-| **分析深度** | 模式匹配 + AST | 跨函数语义推理 | 自适应多轮攻击 |
-| **CI/CD 友好** | ✅ 零配置 | 需 API key | 需 Node.js + API key |
-| **离线可用** | ✅（配合 `--no-cve`） | ❌ | ❌ |
+## 安全加固
 
-对绝大多数用户而言，第一层已经足够。第二、三层适合需要 LLM 驱动的深度分析的专业场景。
+ClawLock 当前内置 **18 项加固措施**。
+
+- `clawlock harden`：交互式模式
+- `clawlock harden --auto`：应用安全、非破坏性的动作，并输出仅建议类项的人工指导
+- `clawlock harden --auto-fix`：只执行真正安全的本地自动修复
+
+当前需要特别注意：
+
+- 加固向导会把措施分成 **现在可安全应用 / 仅建议 / 需要确认** 三组展示
+- 目前只有 **`H009`** 会真正执行本地自动修复
+- `H009` 会收紧支持的配置目录以及 `.npmrc`、`.pypirc`、`.netrc` 等常见家目录凭证文件权限
+- 有 UX 影响的措施在交互模式下仍然需要明确确认
+- 仅指导类措施不会再被误报成“已完成”
 
 ## 多平台支持
 
 | 功能 | Linux | macOS | Windows | Android (Termux) |
 |------|:-----:|:-----:|:-------:|:----------------:|
-| 完整扫描管线 | ✅ | ✅ | ✅ | ✅ |
+| 全量扫描管线 | 是 | 是 | 是 | 是 |
 | 进程检测 | `ps aux` | `ps aux` | `tasklist` | `ps -e` |
-| 端口暴露检查 | `ss`/`netstat` | `lsof -iTCP` | `netstat -ano` | `ss`/`netstat` |
-| 凭证权限审计 | Unix `stat` | Unix `stat` | `icacls` ACL | Unix `stat` |
+| 端口暴露检查 | `ss` / `netstat` | `lsof -iTCP` | `netstat -ano` | `ss` / `netstat` |
+| 权限审计 | Unix `stat` | Unix `stat` | `icacls` ACL | Unix `stat` |
 | 权限自动修复 | `chmod` | `chmod` | `icacls` | `chmod` |
-
-## 安全加固
-
-10 项加固措施，每项带有明确的 UX 影响说明。影响功能的措施需要用户明确输入 `y` 确认。使用 `--auto-fix` 自动修复无破坏性项。
-
-## 致谢
-
-衷心感谢以下开源项目对 ClawLock 的启发和增强：
-
-- **[promptfoo](https://github.com/promptfoo/promptfoo)** — ClawLock 红队测试能力的基石。promptfoo 的声明式配置体系、全面的越狱/注入测试框架和 OWASP 合规映射都是业界顶级。感谢 promptfoo 团队打造了如此出色的 LLM 评测平台。
-- **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)**（腾讯朱雀实验室）— ClawLock 集成了 AI-Infra-Guard 的 CVE 漏洞情报 API（覆盖 589+ 个漏洞、43 个 AI 框架）。ClawLock 的 MCP 隐式工具投毒检测模式受到 MCP-ITP 研究（arXiv:2601.07395）的启发。感谢在 AI 基础设施安全领域的开创性工作。
+| 持久化检测 | cron / 用户级 `systemd` | `LaunchAgents` / `launchctl` | `schtasks` / `RunOnce` | `.termux/boot` / `termux-job-scheduler` |
+| 加固引导 | 按平台适配 | 按平台适配 | 按平台适配 | 按平台适配 |
 
 ## 作为 Claw Skill 使用
 
-将 `skill/SKILL.md` 复制到 Claw skills 目录，在 Agent 对话中说「开始安全体检」即可触发。作为 Skill 使用时，所有第一层功能开箱即用。
+把 `skill/SKILL.md` 复制到你的 Claw skills 目录后，就可以在 Claw 对话中触发安全工作流。
+
+详细说明：
+
+- [skill/SKILL.md](skill/SKILL.md)（中文）
+- [skill/SKILL_EN.md](skill/SKILL_EN.md)（英文）
+
+示例：
 
 ```bash
-mkdir -p ~/.openclaw/skills/clawlock && cp skill/SKILL.md ~/.openclaw/skills/clawlock/
+mkdir -p ~/.openclaw/skills/clawlock
+cp skill/SKILL.md ~/.openclaw/skills/clawlock/
 ```
 
-## 项目结构
-
-```
-clawlock/
-├── scanners/
-│   ├── __init__.py         # 75 条检测规则，覆盖 9 个扫描类别
-│   ├── mcp_deep.py         # 内建 MCP 深度扫描引擎 (28+ 模式 + AST)
-│   └── agent_scan.py       # 内建 OWASP ASI 14 引擎 (3 层)
-├── integrations/
-│   ├── __init__.py         # 云端情报、成本分析、可选增强器
-│   └── promptfoo.py        # LLM 红队测试封装（9 插件 × 8 策略）
-├── adapters/               # 平台适配层（4 个 Claw 适配器）
-├── hardening/              # 10 项加固措施 + UX 影响声明
-├── reporters/              # Rich 终端 + JSON + HTML 报告 + 安全评分 (S~D)
-├── utils/                  # 跨平台抽象层（Windows / Mac / Linux / Android）
-└── __main__.py             # Typer CLI（12 个命令）
-```
-
-## CI/CD 集成
+## CI/CD 示例
 
 ```yaml
 - name: ClawLock security gate
@@ -165,19 +229,26 @@ clawlock/
 git clone https://github.com/g1at/clawlock.git
 cd clawlock
 pip install -e ".[dev]"
-pytest tests/ -v     # 59 个测试
+pytest tests/test_clawlock.py -v    # 104 tests
 ```
 
 ## 贡献
 
-欢迎贡献！以下方向尤其欢迎：
+适合扩展的主要位置：
 
-- 新增检测模式 → `scanners/__init__.py`
-- MCP 扫描模式 → `scanners/mcp_deep.py`
-- ASI 检测规则 → `scanners/agent_scan.py`
-- 新增平台适配器 → `adapters/__init__.py`
-- 新增加固措施 → `hardening/__init__.py`
+- `clawlock/scanners/__init__.py`
+- `clawlock/scanners/mcp_deep.py`
+- `clawlock/scanners/agent_scan.py`
+- `clawlock/hardening/__init__.py`
+- `clawlock/reporters/__init__.py`
+
+## 致谢
+
+衷心感谢以下开源项目对 ClawLock 的启发和增强：
+
+- **[promptfoo](https://github.com/promptfoo/promptfoo)** — ClawLock 红队工作流的重要灵感来源。promptfoo 的声明式配置模型、对越狱与注入场景的广泛覆盖，以及面向 OWASP 的评测思路，都对 ClawLock 的端点红队设计产生了很大启发。感谢 promptfoo 团队打造了如此出色的 LLM 评测平台。
+- **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)**（腾讯朱雀实验室）— ClawLock 受益于 AI-Infra-Guard 相关的漏洞情报工作，以及更广泛的 AI 基础设施安全研究。ClawLock 的 MCP 隐式工具投毒检测覆盖，也参考了 MCP-ITP 研究（[arXiv:2601.07395](https://arxiv.org/abs/2601.07395)）中的思路。感谢在 AI 系统安全领域持续推进务实而有价值的研究工作。
 
 ## 许可证
 
-ClawLock 采用 [Apache License 2.0](LICENSE) 和 [MIT License](LICENSE) 双重许可。你可以自由选择其中任一许可证。
+ClawLock 采用 [Apache License 2.0](LICENSE) 和 [MIT License](LICENSE) 双许可证，你可以任选其一使用。

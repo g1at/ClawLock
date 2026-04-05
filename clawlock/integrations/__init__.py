@@ -1,5 +1,5 @@
 """
-ClawLock v1.4.0 integrations — cloud intelligence, cost analysis,
+ClawLock v2.0.0 integrations — cloud intelligence,
 external scanner, and Agent-Scan.
 """
 
@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 import httpx
@@ -133,68 +134,6 @@ def verdict_to_finding(skill_name: str, intel: dict) -> Optional[Finding]:
     )
 
 
-MODEL_COST_PER_1K = {
-    "gpt-4o": 0.005,
-    "gpt-4o-mini": 0.00015,
-    "gpt-4": 0.03,
-    "gpt-3.5-turbo": 0.0005,
-    "claude-opus-4": 0.015,
-    "claude-sonnet-4": 0.003,
-    "claude-haiku": 0.00025,
-    "claude-3.5-sonnet": 0.003,
-    "claude-3-opus": 0.015,
-}
-
-
-def analyze_cost(config: dict, cfg_path: str = "") -> list[Finding]:
-    """Analyze config for cost optimization opportunities."""
-    findings = []
-    model = (
-        config.get("model", "")
-        or config.get("defaultModel", "")
-        or config.get("llm", {}).get("model", "")
-    ).lower()
-    if model:
-        for expensive in ["gpt-4o", "claude-opus", "gpt-4"]:
-            if expensive in model:
-                findings.append(
-                    Finding(
-                        "cost",
-                        WARN,
-                        t(f"使用高价模型: {model}", f"Using expensive model: {model}"),
-                        t(f"当前默认模型 {model} 费用较高。对于简单任务，考虑使用 mini/haiku 变体。", f"Default model {model} is expensive. For simple tasks, consider mini/haiku variants."),
-                        "config:model",
-                        remediation=t("根据任务复杂度选择合适的模型级别。", "Choose model tier based on task complexity."),
-                    )
-                )
-                break
-    heartbeat = config.get("heartbeat", {}) or config.get("cron", {})
-    if isinstance(heartbeat, dict):
-        interval = heartbeat.get("interval", heartbeat.get("frequency", 0))
-        if isinstance(interval, (int, float)) and 0 < interval < 60:
-            findings.append(
-                Finding(
-                    "cost",
-                    WARN,
-                    t("心跳/定时任务频率过高", "Heartbeat/cron frequency too high"),
-                    t(f"心跳间隔 {interval}秒，高频调用会持续消耗 API 额度。", f"Heartbeat interval {interval}s — high-frequency calls continuously consume API quota."),
-                    remediation=t("将心跳间隔设为 300 秒（5分钟）以上。", "Set heartbeat interval to 300+ seconds (5 min)."),
-                )
-            )
-    max_tokens = config.get("maxTokens", config.get("max_tokens", 0))
-    if isinstance(max_tokens, int) and max_tokens > 8000:
-        findings.append(
-            Finding(
-                "cost",
-                INFO,
-                t(f"最大 Token 数较高: {max_tokens}", f"Max tokens is high: {max_tokens}"),
-                t("较高的 max_tokens 值在每次请求中消耗更多额度。", "High max_tokens value consumes more quota per request."),
-                remediation=t("根据实际需要调整 maxTokens 值。", "Adjust maxTokens based on actual needs."),
-            )
-        )
-    return findings
-
-
 def _ext_installed() -> bool:
     return shutil.which("ai-infra-guard") is not None
 
@@ -258,47 +197,76 @@ def run_agent_scan(
         code_path=code_path,
         llm_model=model,
         llm_token=token,
-        llm_base_url=base_url or "https://api.anthropic.com",
+        llm_base_url=base_url or "",
         enable_llm=enable_llm,
     )
     return findings
+
+
+def _ext_token_env(model: str, token: str, base_url: str) -> dict:
+    """Pass enhancer credentials via env instead of argv where possible."""
+    env = {}
+    if not token:
+        return env
+    provider = (
+        "anthropic"
+        if "anthropic" in (base_url or "").lower()
+        or token.startswith("sk-ant-")
+        or model.lower().startswith(("claude", "anthropic"))
+        else "openai"
+    )
+    env["AI_INFRA_GUARD_TOKEN"] = token
+    if provider == "anthropic":
+        env["ANTHROPIC_API_KEY"] = token
+    else:
+        env["OPENAI_API_KEY"] = token
+    return env
 
 
 def _run_ext_mcp(
     code_path: Path, model: str, token: str, base_url: str
 ) -> list[Finding]:
     """Run ai-infra-guard mcp binary as optional enhancer."""
-    import tempfile
-
-    out_path = os.path.join(tempfile.gettempdir(), "clawlock_mcp_ext.json")
-    cmd = [
-        "ai-infra-guard",
-        "mcp",
-        "--code",
-        str(code_path),
-        "--model",
-        model,
-        "--token",
-        token,
-        "--json",
-        out_path,
-    ]
-    if base_url:
-        cmd += ["--base-url", base_url]
-    try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        results = json.loads(Path(out_path).read_text()).get("results", [])
-        return [
-            Finding(
-                "mcp_deep_ext",
-                CRIT
-                if str(it.get("severity", "")).lower() in ("critical", "high")
-                else WARN,
-                f"[AIG] {it.get('title', '')}",
-                it.get("description", "")[:200],
-                remediation=it.get("remediation", ""),
-            )
-            for it in results
+    with tempfile.TemporaryDirectory(prefix="clawlock-mcp-") as tmpdir:
+        out_path = Path(tmpdir) / "mcp_ext.json"
+        cmd = [
+            "ai-infra-guard",
+            "mcp",
+            "--code",
+            str(code_path),
+            "--model",
+            model,
+            "--json",
+            str(out_path),
         ]
-    except Exception:
-        return []
+        if base_url:
+            cmd += ["--base-url", base_url]
+        try:
+            env = os.environ.copy()
+            env.update(_ext_token_env(model, token, base_url))
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env,
+            )
+            if result.returncode != 0 or not out_path.exists():
+                return []
+            results = json.loads(out_path.read_text(encoding="utf-8")).get(
+                "results", []
+            )
+            return [
+                Finding(
+                    "mcp_deep_ext",
+                    CRIT
+                    if str(it.get("severity", "")).lower() in ("critical", "high")
+                    else WARN,
+                    f"[AIG] {it.get('title', '')}",
+                    it.get("description", "")[:200],
+                    remediation=it.get("remediation", ""),
+                )
+                for it in results
+            ]
+        except Exception:
+            return []

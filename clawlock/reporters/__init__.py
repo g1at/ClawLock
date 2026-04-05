@@ -1,4 +1,4 @@
-"""ClawLock v1.4.0 report renderer - Rich terminal + JSON + HTML output."""
+"""ClawLock v2.0.0 report renderer - Rich terminal + JSON + HTML output."""
 
 from __future__ import annotations
 
@@ -9,14 +9,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from rich import box
 from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
-from ..i18n import t
-from ..scanners import CRIT, HIGH, WARN, Finding
+from ..i18n import current_lang, t
+from ..scanners import CRIT, HIGH, INFO, WARN, Finding
+
+import sys as _sys
+if _sys.platform == "win32":
+    import os as _os
+    _os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:
+        pass
 
 console = Console()
 
@@ -37,7 +44,6 @@ _SCANNER_TO_DOMAIN: Dict[str, str] = {
     "mcp_itp": t("MCP 安全", "MCP Security"),
     "mcp_deep": t("MCP 安全", "MCP Security"),
     "cve": t("漏洞管理", "Vulnerability Mgmt"),
-    "cost": t("成本控制", "Cost Control"),
     "agent_scan": t("Agent 安全", "Agent Security"),
 }
 
@@ -51,7 +57,6 @@ _DOMAIN_WEIGHTS: Dict[str, int] = {
     t("提示词完整性", "Prompt Integrity"): 5,
     t("Agent 安全", "Agent Security"): 5,
     t("运行时安全", "Runtime Security"): 5,
-    t("成本控制", "Cost Control"): 0,
 }
 
 _ALL_DOMAINS = list(_DOMAIN_WEIGHTS.keys())
@@ -72,6 +77,23 @@ _GRADE_HTML_COLORS = {
     "D": "#e24b4a",
 }
 
+_LEVEL_ORDER = {
+    CRIT: 0,
+    HIGH: 1,
+    WARN: 2,
+    "medium": 2,
+    "warn": 2,
+    "warning": 2,
+    "review": 2,
+    INFO: 3,
+}
+
+_LEVEL_PANEL_COLORS = {
+    CRIT: "bright_red",
+    HIGH: "red",
+    WARN: "yellow",
+    INFO: "cyan",
+}
 
 # Per-CVE severity penalty for the CVE domain scoring.
 # Maps metadata["severity"] → equivalent (high_count, warn_count) contribution.
@@ -83,9 +105,6 @@ _CVE_SEVERITY_PENALTY: Dict[str, Tuple[float, float]] = {
 }
 
 
-# Exponential decay coefficients — steeper than typical so that
-# 3 warns ≈ 85, 1 high < 80 at the overall score level.
-_HIGH_DECAY = 0.75   # per high/critical finding
 _WARN_DECAY = 0.15   # per warn finding
 
 # Per-finding baseline deduction applied to overall score so that
@@ -224,28 +243,166 @@ def _build_domain_report(
     return domain_grades, domain_findings, domain_scores, overall_grade, overall_score
 
 
-def _level_badge(level: str) -> Text:
-    if level in (CRIT, HIGH):
-        return Text(t("高危", "High"), style="bold red")
-    if level == WARN:
-        return Text(t("警告", "Warn"), style="bold yellow")
-    return Text(t("信息", "Info"), style="dim")
+def _score_bar(score: int, width: int = 30) -> Text:
+    """Render a visual score bar with block characters."""
+    filled = int(score / 100 * width)
+    color = "red" if score < 60 else ("yellow" if score < 80 else "green")
+    bar = Text()
+    bar.append("█" * filled, style=color)
+    bar.append("░" * (width - filled), style="dim")
+    return bar
 
 
-def _status_icon(findings) -> str:
+def _level_sort_key(level: str) -> int:
+    return _LEVEL_ORDER.get(level, _LEVEL_ORDER[INFO])
+
+
+def _sorted_findings(findings: List[Finding]) -> List[Finding]:
+    return sorted(
+        findings,
+        key=lambda f: (_level_sort_key(f.level), f.title.lower(), f.detail.lower()),
+    )
+
+
+def _severity_counts(findings: List[Finding]) -> Tuple[int, int, int, int]:
+    ordered = list(findings)
+    return (
+        sum(1 for f in ordered if f.level == CRIT),
+        sum(1 for f in ordered if f.level == HIGH),
+        sum(1 for f in ordered if f.level == WARN),
+        sum(1 for f in ordered if f.level not in (CRIT, HIGH, WARN)),
+    )
+
+
+def _finding_level_style(level: str) -> str:
+    return _LEVEL_PANEL_COLORS.get(level, _LEVEL_PANEL_COLORS[INFO])
+
+
+def _findings_tone(findings: List[Finding]) -> str:
     if any(f.level in (CRIT, HIGH) for f in findings):
-        return t("风险", "Risk")
+        return "risk"
     if any(f.level == WARN for f in findings):
-        return t("待查", "Review")
-    return t("通过", "Pass")
+        return "review"
+    return "pass"
 
 
-def _status_style(status: str) -> str:
-    if status == t("风险", "Risk"):
+def _tone_message_style(tone: str) -> str:
+    if tone == "risk":
         return "bold red"
-    if status == t("待查", "Review"):
+    if tone == "review":
         return "bold yellow"
     return "bold green"
+
+
+def _status_token(findings: List[Finding]) -> Tuple[str, str]:
+    tone = _findings_tone(findings)
+    if tone == "risk":
+        return (t("风险", "RISK"), "red")
+    if tone == "review":
+        return (t("待查", "REVIEW"), "yellow")
+    return (t("通过", "PASS"), "green")
+
+
+def _print_section(title: str) -> None:
+    console.print()
+    console.print(Text(title, style="bold cyan"))
+
+
+def _print_finding_block(
+    finding: Finding,
+    *,
+    index: Optional[int] = None,
+) -> None:
+    prefix = f"{index}. " if index is not None else "- "
+    header = Text()
+    header.append(prefix, style="dim")
+    header.append(f"[{_plain_level_label(finding.level)}] ", style=f"bold {_finding_level_style(finding.level)}")
+    header.append(finding.title, style="bold")
+    console.print(header)
+    console.print(f"   {t('详情', 'Detail')}: {finding.detail}")
+    if finding.location:
+        console.print(f"   {t('位置', 'Location')}: {finding.location}")
+    if finding.remediation:
+        console.print(f"   {t('修复', 'Fix')}: {finding.remediation}", style="dim")
+
+
+def _plain_level_label(level: str) -> str:
+    if level == CRIT:
+        return t("严重", "CRIT")
+    if level == HIGH:
+        return t("高危", "HIGH")
+    if level == WARN:
+        return t("警告", "WARN")
+    return t("信息", "INFO")
+
+
+def _plain_check_summary(findings: List[Finding]) -> str:
+    crit_count, high_count, warn_count, info_count = _severity_counts(findings)
+    parts = []
+    if crit_count:
+        parts.append(t(f"{crit_count} 严重", f"{crit_count} crit"))
+    if high_count:
+        parts.append(t(f"{high_count} 高危", f"{high_count} high"))
+    if warn_count:
+        parts.append(t(f"{warn_count} 警告", f"{warn_count} warn"))
+    if info_count and not parts:
+        parts.append(t(f"{info_count} 信息", f"{info_count} info"))
+    return ", ".join(parts) if parts else t("未发现问题", "no issue found")
+
+
+def render_focus_report(
+    title: str,
+    subject: str,
+    findings: List[Finding],
+    *,
+    ok_message: str,
+    review_message: str,
+    risk_message: str,
+    limit: int = 5,
+) -> None:
+    ordered = _sorted_findings(findings)
+    crit_count, high_count, warn_count, info_count = _severity_counts(ordered)
+    tone = _findings_tone(ordered)
+    message = ok_message
+    if tone == "risk":
+        message = risk_message
+    elif tone == "review":
+        message = review_message
+
+    _print_section(f"## {title}")
+    console.print(f"{t('对象', 'Target')}: [bold]{subject}[/bold]")
+    console.print(Text(message, style=_tone_message_style(tone)))
+    console.print(
+        Text.from_markup(
+            f"[bold]{t('摘要', 'Summary')}:[/bold] "
+            f"{t('高危', 'High Risk')} {crit_count + high_count} | "
+            f"{t('待关注', 'Needs Review')} {warn_count} | "
+            f"{t('信息项', 'Info')} {info_count} | "
+            f"{t('总发现', 'Total')} {len(ordered)}"
+        )
+    )
+
+    if ordered:
+        _print_section(f"### {t('重点发现', 'Key Findings')}")
+        for idx, finding in enumerate(ordered[:limit], start=1):
+            _print_finding_block(finding, index=idx)
+        if len(ordered) > limit:
+            console.print(
+                Text(
+                    t(
+                        f"其余 {len(ordered) - limit} 项已省略。",
+                        f"{len(ordered) - limit} additional item(s) omitted.",
+                    ),
+                    style="dim",
+                )
+            )
+    else:
+        console.print(
+            Text(
+                t("当前未发现需要优先处理的问题。", "No issues require immediate attention."),
+                style="green",
+            )
+        )
 
 
 def render_scan_report(
@@ -258,7 +415,9 @@ def render_scan_report(
     """Render scan results in text, JSON, or HTML."""
     scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_f = [f for fs in all_findings_map.values() for f in fs]
-    nc = sum(1 for f in all_f if f.level in (CRIT, HIGH))
+    n_crit = sum(1 for f in all_f if f.level == CRIT)
+    n_high = sum(1 for f in all_f if f.level == HIGH)
+    nc = n_crit + n_high  # combined for scoring compatibility
     nw = sum(1 for f in all_f if f.level == WARN)
 
     domain_grades, domain_findings, domain_scores, overall_grade, score = (
@@ -273,7 +432,7 @@ def render_scan_report(
     if output_format == "json":
         out = {
             "tool": "ClawLock",
-            "version": "1.4.0",
+            "version": "2.0.0",
             "time": scan_time,
             "adapter": adapter_name,
             "device": dev_fp,
@@ -311,96 +470,102 @@ def render_scan_report(
         )
         return
 
-    console.print()
+    grade_style = _GRADE_STYLES.get(overall_grade, "bold red")
+    sc_color = "red" if score < 60 else ("yellow" if score < 80 else "green")
+
+    _print_section(f"# {t('ClawLock 安全报告', 'ClawLock Security Report')}")
     console.print(
-        Panel(
-            f"[bold]{t('ClawLock 安全报告', 'ClawLock Security Report')}[/bold]",
-            subtitle=f"{t('时间', 'Time')} {scan_time}  |  {t('适配器', 'Adapter')} {adapter_name} {adapter_version}  |  {t('设备', 'Device')} {dev_fp}",
-            border_style="cyan",
+        Text.from_markup(
+            f"[bold]{t('时间', 'Time')}:[/bold] {scan_time}   "
+            f"[bold]{t('适配器', 'Adapter')}:[/bold] {adapter_name} {adapter_version}   "
+            f"[bold]{t('设备', 'Device')}:[/bold] {dev_fp}"
         )
     )
-    sc = "red" if score < 60 else ("yellow" if score < 80 else "green")
-    og_style = _GRADE_STYLES.get(overall_grade, "bold red")
-    console.print(
-        f"  {t('分数', 'Score')} [bold {sc}]{score}/100[/bold {sc}]"
-        f"  |  {t('等级', 'Grade')} [{og_style}]{overall_grade}[/{og_style}]"
-        f"  |  [red]{t('高危', 'High')} {nc}[/red]"
-        f"  |  [yellow]{t('警告', 'Warn')} {nw}[/yellow]"
-    )
-    console.print()
+    score_line = Text()
+    score_line.append(f"{t('评分', 'Score')}: ", style="bold")
+    score_line.append(f"{score}/100", style=f"bold {sc_color}")
+    score_line.append("   ")
+    score_line.append(f"{t('等级', 'Grade')}: ", style="bold")
+    score_line.append(overall_grade, style=grade_style)
+    score_line.append("   ")
+    score_line.append(f"{t('严重', 'Crit')}: ", style="bold")
+    score_line.append(str(n_crit), style="bold bright_red")
+    score_line.append("   ")
+    score_line.append(f"{t('高危', 'High')}: ", style="bold")
+    score_line.append(str(n_high), style="bold red")
+    score_line.append("   ")
+    score_line.append(f"{t('警告', 'Warn')}: ", style="bold")
+    score_line.append(str(nw), style="bold yellow")
+    console.print(score_line)
+    console.print(f"{t('评分条', 'Score Bar')}: ", end="")
+    console.print(_score_bar(score))
 
-    # Domain grading table
-    grade_tbl = Table(
-        box=box.ROUNDED, show_header=True, header_style="bold cyan", title=t("安全域", "Security Domains")
-    )
-    grade_tbl.add_column(t("域", "Domain"), min_width=16)
-    grade_tbl.add_column(t("等级", "Grade"), min_width=8, justify="center")
-    grade_tbl.add_column(t("分数", "Score"), min_width=8, justify="center")
-    grade_tbl.add_column(t("高危", "High"), min_width=6, justify="center")
-    grade_tbl.add_column(t("警告", "Warn"), min_width=6, justify="center")
+    _print_section(f"## {t('安全域评级', 'Security Domain Grades')}")
     for domain in _ALL_DOMAINS:
-        g = domain_grades[domain]
-        dfs = domain_findings[domain]
-        ds = domain_scores[domain]
-        if not dfs and g == "S":
-            has_scanner = any(
-                _SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f
-            )
-            if not has_scanner and not dfs:
+        findings = domain_findings[domain]
+        grade = domain_grades[domain]
+        if not findings and grade == "S":
+            has_scanner = any(_SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f)
+            if not has_scanner:
                 continue
-        g_style = _GRADE_STYLES.get(g, "dim")
-        ds_style = "red" if ds < 60 else ("yellow" if ds < 80 else "green")
-        dh = sum(1 for f in dfs if f.level in (CRIT, HIGH))
-        dw = sum(1 for f in dfs if f.level == WARN)
-        grade_tbl.add_row(
-            domain,
-            Text(g, style=g_style),
-            Text(str(ds), style=ds_style),
-            str(dh) if dh else "-",
-            str(dw) if dw else "-",
-        )
-    console.print(grade_tbl)
-    console.print()
+        crit_count, high_count, warn_count, _ = _severity_counts(findings)
+        line = Text()
+        line.append(f"- {domain}: ", style="default")
+        line.append(grade, style=_GRADE_STYLES.get(grade, "dim"))
+        line.append(f"  {domain_scores[domain]}/100", style="bold")
+        if crit_count:
+            line.append(f"  {t('严重', 'Crit')} {crit_count}", style="bright_red")
+        if high_count:
+            line.append(f"  {t('高危', 'High')} {high_count}", style="red")
+        if warn_count:
+            line.append(f"  {t('警告', 'Warn')} {warn_count}", style="yellow")
+        console.print(line)
 
-    # Per-check summary table
-    summary = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
-    summary.add_column(t("检查项", "Check"), min_width=14)
-    summary.add_column(t("状态", "Status"), min_width=12)
-    summary.add_column(t("摘要", "Summary"), min_width=40)
-    for label, fs in all_findings_map.items():
-        status = _status_icon(fs) if fs else t("通过", "Pass")
-        high_count = len([f for f in fs if f.level in (CRIT, HIGH)])
-        warn_count = len([f for f in fs if f.level == WARN])
-        summary.add_row(
-            label,
-            Text(status, style=_status_style(status)),
-            t(f"{high_count} 高危, {warn_count} 警告", f"{high_count} high, {warn_count} warn") if fs else t("未发现问题", "no issue found"),
-        )
-    console.print(summary)
-    console.print()
+    _print_section(f"## {t('检查摘要', 'Check Summary')}")
+    for label, findings in all_findings_map.items():
+        token, color = _status_token(findings)
+        summary_line = Text()
+        summary_line.append(f"- {label}: ", style="default")
+        summary_line.append(token, style=f"bold {color}")
+        summary_line.append(f"  {_plain_check_summary(findings)}", style="default")
+        console.print(summary_line)
 
-    step = 0
-    for label, fs in all_findings_map.items():
-        step += 1
-        if not fs:
+    _print_section(f"## {t('优先处理', 'Priority Queue')}")
+    priority_findings = [f for f in all_f if f.level in (CRIT, HIGH, WARN)]
+    if priority_findings:
+        for idx, finding in enumerate(_sorted_findings(priority_findings)[:5], start=1):
+            _print_finding_block(finding, index=idx)
+        if len(priority_findings) > 5:
+            console.print(
+                Text(
+                    t(
+                        f"其余 {len(priority_findings) - 5} 项请查看下方详细发现。",
+                        f"{len(priority_findings) - 5} more item(s) appear in the detailed findings below.",
+                    ),
+                    style="dim",
+                )
+            )
+    else:
+        console.print(Text(t("当前未发现需要优先处理的问题。", "No issues require immediate attention."), style="green"))
+
+    for domain in _ALL_DOMAINS:
+        dfs = domain_findings[domain]
+        if not dfs:
             continue
-        console.print(f"[bold cyan]{t('步骤', 'Step')} {step}: {label}[/bold cyan]")
-        tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold")
-        tbl.add_column(t("级别", "Level"), min_width=10)
-        tbl.add_column(t("发现", "Finding"), min_width=30)
-        tbl.add_column(t("详情", "Detail"), min_width=40)
-        for f in fs:
-            tbl.add_row(_level_badge(f.level), f.title[:60], f.detail[:80])
-        console.print(tbl)
-        for f in fs[:3]:
-            if f.remediation:
-                console.print(f"  [dim]{t('修复', 'Fix')}: {f.remediation}[/dim]")
-        console.print()
+        g = domain_grades[domain]
+        ds = domain_scores[domain]
+        _print_section(f"### {domain} · {t('等级', 'Grade')} {g} · {t('分数', 'Score')} {ds}/100")
+        for finding in _sorted_findings(dfs):
+            _print_finding_block(finding)
 
+    console.print()
     console.print(
-        Panel(
-            f"[dim]{t('由 ClawLock v1.4.0 生成。静态分析仅反映当前可见的代码和配置。', 'Generated by ClawLock v1.4.0. Static analysis reflects the currently visible code and config only.')}[/dim]",
-            border_style="dim",
+        Text(
+            t(
+                "注：静态分析仅反映当前可见的代码和配置。",
+                "Note: static analysis reflects the currently visible code and config only.",
+            ),
+            style="dim",
         )
     )
 
@@ -408,112 +573,219 @@ def render_scan_report(
 def _render_html(
     adapter_name, adapter_version, scan_time, all_findings_map, output_path
 ):
-    """Generate a standalone HTML report."""
+    """Generate a modern standalone HTML report with dark mode support."""
     all_f = [f for fs in all_findings_map.values() for f in fs]
     domain_grades, domain_findings, domain_scores, overall_grade, score = (
         _build_domain_report(all_f)
     )
-    nc = sum(1 for f in all_f if f.level in (CRIT, HIGH))
+    n_crit = sum(1 for f in all_f if f.level == CRIT)
+    n_high = sum(1 for f in all_f if f.level == HIGH)
     nw = sum(1 for f in all_f if f.level == WARN)
 
-    sc = "#e24b4a" if score < 60 else ("#ef9f27" if score < 80 else "#1d9e75")
-    og_color = _GRADE_HTML_COLORS.get(overall_grade, "#e24b4a")
-    cap_notice = ""
+    sc = _GRADE_HTML_COLORS.get(overall_grade, "#e24b4a")
+    angle = int(score * 3.6)
 
-    # Build domain grading HTML rows
-    domain_rows = ""
+    # Build domain cards
+    domain_cards: List[str] = []
     for domain in _ALL_DOMAINS:
         g = domain_grades[domain]
         dfs = domain_findings[domain]
         ds = domain_scores[domain]
         if not dfs and g == "S":
-            has_scanner = any(
-                _SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f
-            )
-            if not has_scanner:
+            if not any(_SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f):
                 continue
         g_color = _GRADE_HTML_COLORS.get(g, "#888")
-        ds_color = "#e24b4a" if ds < 60 else ("#ef9f27" if ds < 80 else "#1d9e75")
-        dh = sum(1 for f in dfs if f.level in (CRIT, HIGH))
+        dc = sum(1 for f in dfs if f.level == CRIT)
+        dh = sum(1 for f in dfs if f.level == HIGH)
         dw = sum(1 for f in dfs if f.level == WARN)
-        domain_rows += (
-            f'<tr><td>{html_mod.escape(domain)}</td>'
-            f'<td style="text-align:center"><span style="background:{g_color};color:#fff;'
-            f'padding:2px 12px;border-radius:4px;font-weight:700;font-size:14px">{g}</span></td>'
-            f'<td style="text-align:center;color:{ds_color};font-weight:600">{ds}</td>'
-            f'<td style="text-align:center">{dh or "-"}</td>'
-            f'<td style="text-align:center">{dw or "-"}</td></tr>\n'
+        stats_parts = []
+        if dc:
+            stats_parts.append(f'{dc} {t("严重", "crit")}')
+        if dh:
+            stats_parts.append(f'{dh} {t("高危", "high")}')
+        stats_parts.append(f'{dw} {t("警告", "warn")}')
+        domain_cards.append(
+            f'<div class="domain-card" style="border-left:4px solid {g_color}">'
+            f'<div class="domain-header">'
+            f'<span class="domain-name">{html_mod.escape(domain)}</span>'
+            f'<span class="domain-grade" style="color:{g_color}">{g}</span>'
+            f'</div>'
+            f'<div class="domain-score" style="color:{g_color}">{ds}/100</div>'
+            f'<div class="domain-stats">{" · ".join(stats_parts)}</div>'
+            f'</div>'
         )
+    domain_html = "\n".join(domain_cards)
 
-    rows = ""
+    # Build finding sections grouped by check label
+    findings_parts: List[str] = []
     for label, fs in all_findings_map.items():
         if not fs:
             continue
+        items: List[str] = []
         for f in fs:
-            lv_color = (
-                "#e24b4a"
-                if f.level in (CRIT, HIGH)
-                else ("#ef9f27" if f.level == WARN else "#888")
+            if f.level == CRIT:
+                badge_cls, badge_text = "badge-crit", t("严重", "Crit")
+            elif f.level == HIGH:
+                badge_cls, badge_text = "badge-high", t("高危", "High")
+            elif f.level == WARN:
+                badge_cls, badge_text = "badge-warn", t("警告", "Warn")
+            else:
+                badge_cls, badge_text = "badge-info", t("信息", "Info")
+            fix_html = (
+                f'<p class="fix">💡 {t("修复", "Fix")}: {html_mod.escape(f.remediation)}</p>'
+                if f.remediation else ""
             )
-            lv_text = (
-                t("高危", "High")
-                if f.level in (CRIT, HIGH)
-                else (t("警告", "Warn") if f.level == WARN else t("信息", "Info"))
+            loc_html = (
+                f'<p class="loc">📍 {html_mod.escape(f.location)}</p>'
+                if f.location else ""
             )
-            rows += (
-                "<tr>"
-                f'<td style="text-align:center"><span style="background:{lv_color};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px">{lv_text}</span></td>'
-                f"<td>{html_mod.escape(label)}</td>"
-                f'<td><b>{html_mod.escape(f.title[:80])}</b><br><span style="color:#666;font-size:13px">{html_mod.escape(f.detail[:120])}</span></td>'
-                f'<td style="font-size:13px">{html_mod.escape(f.remediation[:100])}</td></tr>\n'
+            items.append(
+                f'<details class="finding">'
+                f'<summary><span class="badge {badge_cls}">{badge_text}</span> '
+                f'{html_mod.escape(f.title)}</summary>'
+                f'<div class="finding-body">'
+                f'<p>{html_mod.escape(f.detail)}</p>'
+                f'{fix_html}{loc_html}'
+                f'</div></details>'
             )
+        findings_parts.append(
+            f'<h3>{html_mod.escape(label)}</h3>\n' + "\n".join(items)
+        )
+    findings_html = "\n".join(findings_parts)
+
     _title = t("ClawLock 安全报告", "ClawLock Security Report")
-    _lbl_time = t("时间", "Time")
-    _lbl_adapter = t("适配器", "Adapter")
-    _lbl_score = t("分数", "Score")
-    _lbl_grade = t("等级", "Grade")
-    _lbl_high = t("高危", "High")
-    _lbl_warn = t("警告", "Warn")
-    _lbl_domains = t("安全域", "Security Domains")
-    _lbl_domain = t("域", "Domain")
-    _lbl_findings = t("发现", "Findings")
-    _lbl_level = t("级别", "Level")
-    _lbl_check = t("检查项", "Check")
-    _lbl_finding = t("发现", "Finding")
-    _lbl_fix = t("修复", "Fix")
-    _footer1 = t("由 ClawLock v1.4.0 生成", "Generated by ClawLock v1.4.0")
-    _footer2 = t("静态分析仅反映当前可见的代码和配置。", "Static analysis reflects the currently visible code and config only.")
-    html_content = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{_title}</title>
-<style>body{{font-family:-apple-system,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;color:#333;background:#fafaf8}}
-h1{{color:#222;border-bottom:2px solid #ddd;padding-bottom:12px}}
-.score{{display:inline-block;font-size:36px;font-weight:700;color:{sc};margin:8px 0}}
-.meta{{color:#888;font-size:14px}}
-table{{width:100%;border-collapse:collapse;margin:20px 0}}
-th{{background:#f5f5f0;text-align:left;padding:10px;border-bottom:2px solid #ddd;font-size:13px}}
-td{{padding:10px;border-bottom:1px solid #eee;vertical-align:top}}
-tr:hover{{background:#f9f9f4}}
-.footer{{margin-top:40px;padding:16px;background:#f5f5f0;border-radius:8px;font-size:13px;color:#888;text-align:center}}
-</style></head><body>
-<h1>{_title}</h1>
-<p class="meta">{_lbl_time} {scan_time} &nbsp; {_lbl_adapter} {adapter_name} {adapter_version}</p>
-<p>{_lbl_score} <span class="score">{score}/100</span> &nbsp;
-{_lbl_grade} <span style="display:inline-block;font-size:36px;font-weight:700;color:{og_color}">{overall_grade}</span> &nbsp;
-{_lbl_high} {nc} &nbsp; {_lbl_warn} {nw}</p>
-{cap_notice}
-<h2 style="margin-top:32px">{_lbl_domains}</h2>
-<table><thead><tr><th>{_lbl_domain}</th><th style="width:80px;text-align:center">{_lbl_grade}</th><th style="width:80px;text-align:center">{_lbl_score}</th><th style="width:60px;text-align:center">{_lbl_high}</th><th style="width:60px;text-align:center">{_lbl_warn}</th></tr></thead>
-<tbody>{domain_rows}</tbody></table>
-<h2 style="margin-top:32px">{_lbl_findings}</h2>
-<table><thead><tr><th style="width:80px">{_lbl_level}</th><th style="width:120px">{_lbl_check}</th><th>{_lbl_finding}</th><th style="width:200px">{_lbl_fix}</th></tr></thead>
-<tbody>{rows}</tbody></table>
-<div class="footer">{_footer1} | <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
-{_footer2}</div></body></html>"""
-    out = Path(output_path or "clawlock-report.html")
+    _lbl_domains = t("安全域评级", "Security Domains")
+    _lbl_findings = t("详细发现", "Detailed Findings")
+    _footer1 = t("由 ClawLock v2.0.0 生成", "Generated by ClawLock v2.0.0")
+    _footer2 = t("静态分析仅反映当前可见的代码和配置。",
+                  "Static analysis reflects the currently visible code and config only.")
+
+    html_lang = "zh" if current_lang() == "zh" else "en"
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="{html_lang}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_title}</title>
+<style>
+:root {{
+  --bg: #fafaf8; --text: #333; --text-dim: #888;
+  --card-bg: #fff; --card-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  --border: #e8e8e0; --hover-bg: #f5f5ef;
+  --header-bg: linear-gradient(135deg, #0d7377 0%, #14919b 100%);
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #1a1a2e; --text: #e0e0e0; --text-dim: #999;
+    --card-bg: #252540; --card-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    --border: #333350; --hover-bg: #2a2a4a;
+    --header-bg: linear-gradient(135deg, #0d4a4d 0%, #0e6b73 100%);
+  }}
+}}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       max-width: 1000px; margin: 0 auto; padding: 24px;
+       background: var(--bg); color: var(--text); line-height: 1.6; }}
+.header {{ background: var(--header-bg); color: #fff; border-radius: 16px;
+           padding: 32px; margin-bottom: 24px; display: flex;
+           align-items: center; gap: 32px; flex-wrap: wrap; }}
+.header h1 {{ font-size: 24px; font-weight: 700; }}
+.header .meta {{ font-size: 13px; opacity: 0.85; margin-top: 4px; }}
+.score-circle {{ width: 110px; height: 110px; border-radius: 50%; flex-shrink: 0;
+  background: conic-gradient({sc} 0deg {angle}deg, rgba(255,255,255,0.2) {angle}deg 360deg);
+  display: flex; align-items: center; justify-content: center; }}
+.score-inner {{ width: 82px; height: 82px; border-radius: 50%;
+  background: rgba(0,0,0,0.25); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; }}
+.score-num {{ font-size: 28px; font-weight: 800; color: #fff; }}
+.score-grade {{ font-size: 14px; font-weight: 600; opacity: 0.9; color: #fff; }}
+.stats {{ display: flex; gap: 16px; margin-top: 8px; }}
+.stat {{ font-size: 14px; opacity: 0.9; }}
+h2 {{ font-size: 18px; font-weight: 700; margin: 28px 0 16px; }}
+.domain-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+               gap: 12px; margin-bottom: 24px; }}
+.domain-card {{ background: var(--card-bg); border-radius: 10px; padding: 16px;
+               box-shadow: var(--card-shadow); transition: transform 0.15s; }}
+.domain-card:hover {{ transform: translateY(-2px); }}
+.domain-header {{ display: flex; justify-content: space-between; align-items: center; }}
+.domain-name {{ font-size: 13px; font-weight: 600; }}
+.domain-grade {{ font-size: 22px; font-weight: 800; }}
+.domain-score {{ font-size: 20px; font-weight: 700; margin: 4px 0; }}
+.domain-stats {{ font-size: 12px; color: var(--text-dim); }}
+h3 {{ font-size: 15px; font-weight: 600; margin: 20px 0 8px;
+     padding-bottom: 6px; border-bottom: 2px solid var(--border); }}
+.finding {{ background: var(--card-bg); border-radius: 8px; margin-bottom: 6px;
+           box-shadow: var(--card-shadow); }}
+.finding summary {{ padding: 12px 16px; cursor: pointer; font-size: 14px;
+                   list-style: none; display: flex; align-items: center; gap: 8px; }}
+.finding summary::-webkit-details-marker {{ display: none; }}
+.finding summary::before {{ content: "\\25B8"; font-size: 12px; color: var(--text-dim);
+                           transition: transform 0.2s; }}
+.finding[open] summary::before {{ transform: rotate(90deg); }}
+.finding-body {{ padding: 0 16px 14px 36px; font-size: 13px; color: var(--text-dim); }}
+.finding-body p {{ margin: 4px 0; }}
+.fix {{ color: #14919b; }}
+.loc {{ font-family: monospace; font-size: 12px; }}
+.badge {{ display: inline-block; padding: 2px 10px; border-radius: 4px;
+         font-size: 11px; font-weight: 600; color: #fff; }}
+.badge-crit {{ background: #c0392b; }}
+.badge-high {{ background: #e24b4a; }}
+.badge-warn {{ background: #ef9f27; }}
+.badge-info {{ background: #888; }}
+.footer {{ margin-top: 40px; padding: 20px; background: var(--card-bg); border-radius: 12px;
+          font-size: 13px; color: var(--text-dim); text-align: center;
+          box-shadow: var(--card-shadow); }}
+.footer a {{ color: #14919b; text-decoration: none; }}
+.footer a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="score-circle">
+    <div class="score-inner">
+      <span class="score-num">{score}</span>
+      <span class="score-grade">{overall_grade}</span>
+    </div>
+  </div>
+  <div>
+    <h1>{_title}</h1>
+    <div class="meta">{scan_time} · {adapter_name} {adapter_version}</div>
+    <div class="stats">
+      <span class="stat">{t('🔴 严重', '🔴 Crit')} {n_crit}</span>
+      <span class="stat">{t('🟠 高危', '🟠 High')} {n_high}</span>
+      <span class="stat">{t('🟡 警告', '🟡 Warn')} {nw}</span>
+    </div>
+  </div>
+</div>
+
+<h2>{t('📊', '📊')} {_lbl_domains}</h2>
+<div class="domain-grid">
+{domain_html}
+</div>
+
+<h2>{t('🔍', '🔍')} {_lbl_findings}</h2>
+{findings_html}
+
+<div class="footer">
+  {_footer1} · <a href="https://github.com/g1at/clawlock">github.com/g1at/clawlock</a><br>
+  {_footer2}
+</div>
+</body>
+</html>"""
+
+    out = Path(output_path or "clawlock-report.html").expanduser().resolve()
     out.write_text(html_content, encoding="utf-8")
-    console.print(f"[green]{t('HTML 报告已保存', 'Saved HTML report')}: {out.absolute()}[/green]")
+    console.print(f"[green]{t('HTML 报告已保存', 'Saved HTML report')}: {out}[/green]")
     import webbrowser
 
+    opened = False
     try:
-        webbrowser.open(f"file://{out.absolute()}")
+        opened = bool(webbrowser.open(out.as_uri()))
     except Exception:
-        pass
+        opened = False
+
+    if not opened:
+        console.print(
+            f"[yellow]{t('未能自动打开浏览器，请手动打开该文件', 'Could not open a browser automatically. Open this file manually')}: {out}[/yellow]"
+        )
