@@ -6,11 +6,11 @@ description: >
   hardening, or skill audit:
   "security scan" "health check" "check skill safety" "harden my claw"
   "drift detection" "red team test" "React2Shell"
-  "agent-scan" "discover installations" "credential audit" "cost analysis"
+  "agent-scan" "discover installations" "credential audit"
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.4.0"
+    version: "2.0.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -21,10 +21,7 @@ metadata:
       bins:
         - clawlock    # Main binary; works with autoAllowSkills for automatic approval
       bins_optional:
-        - promptfoo   # Only needed for Feature 7 red-team; all other features are zero-dependency
-    note: >
-      MCP deep scan and Agent-Scan use built-in Python engines.
-      ai-infra-guard binary is no longer required. If installed, it auto-enhances results.
+        - promptfoo
 ---
 
 # ClawLock
@@ -41,29 +38,14 @@ Runs on Linux · macOS · Windows · Android (Termux).
 
 ```bash
 pip install clawlock          # Install
-clawlock scan                 # Full 9-step scan
+clawlock scan                 # Full security scan
 clawlock discover             # Find all installations
 clawlock precheck ./SKILL.md  # Pre-check new skill
-clawlock harden --auto-fix    # Harden (auto-fix safe items)
+clawlock harden --auto-fix    # Harden (auto-fix real safe local changes)
 clawlock scan --format html   # HTML report
 ```
 
-To use as a Claw Skill: copy this file to your skills directory, then say "security scan" in your Agent conversation.
-
----
-
-## Privacy Disclosure
-
-Most checks run **entirely locally**. Network requests are made only for:
-
-| Request | Data Sent | Never Sent | Dependency |
-|---------|-----------|------------|-----------|
-| CVE advisory query | Product name (fixed string) + version | No file contents, no credentials | None (built-in) |
-| Skill threat intel query | Skill name + source label | No code contents, no user data | None (built-in) |
-| Agent-Scan LLM assessment (optional) | Code snippet (truncated to 8K chars) | No full source, no credentials | Requires `--llm` + API key |
-| promptfoo red-team (optional) | Test prompt payloads | No local files | Requires promptfoo installed |
-
-Use `--no-cve` to disable all network requests. Cloud URL is configurable: `export CLAWLOCK_CLOUD_URL=https://your-instance`.
+To use as a Claw Skill: copy this file to your skills directory, then request a security check in the relevant Claw product conversation.
 
 ---
 
@@ -79,7 +61,7 @@ After triggering, classify the request and stay narrow — **do not cross featur
 | Harden / tighten config | **Feature 4: Hardening Wizard** | None |
 | SOUL.md / memory file drift | **Feature 5: Drift Detection** | None |
 | Find installations on this machine | **Feature 6: Discovery** | None |
-| Red-team / jailbreak test | **Feature 7: LLM Red-Team** | ⚠️ Requires promptfoo |
+| Red-team / jailbreak test | **Feature 7: LLM Red-Team** | ⚠️ Requires Node.js + promptfoo / npx |
 | MCP server security | **Feature 8: MCP Deep Scan** | None (v1.1 built-in engine) |
 | React2Shell / CVE-2025-55182 | **Feature 9: Dependency CVE checks (integrated into code scans)** | None |
 | Multi-agent security scan | **Feature 10: Agent-Scan** | None (v1.1 built-in engine) |
@@ -90,25 +72,57 @@ Do not treat normal Claw usage, debugging, or dependency installation as reasons
 
 ---
 
-## Scan Start Prompt
+## Privacy Disclosure
 
-Before starting any scan (Features 1–10), output a single startup line:
+Most checks run **entirely locally**. The following network requests happen only when the corresponding feature is enabled:
 
-```
-🔍 ClawLock scanning {target} for security issues, please wait...
-```
+| Request | Data Sent | Never Sent | Dependency |
+|---------|-----------|------------|-----------|
+| CVE advisory query | Product name (fixed string) + version | No file contents, no credentials | None (built-in) |
+| Skill threat intel query | Skill name + source label | No code contents, no user data | None (built-in) |
+| Agent-Scan LLM assessment (optional) | Code snippet (truncated to 8K chars) | No full source, no credentials | Requires `--llm` + API key |
+| promptfoo red-team (optional) | Test prompt payloads | No local files | Requires Node.js and runs through promptfoo or npx |
 
-Replace `{target}` with the actual target (e.g. `OpenClaw environment`, `my-skill`, `http://server:3000`).
+Offline-first examples:
 
-## Language Adaptation
+- Full scan offline: `clawlock scan --no-cve --no-redteam`
+- Single-skill audit offline: `clawlock skill /path/to/skill --no-cloud`
+- If `--llm` is not enabled, Agent-Scan does not make LLM requests
 
-This is the English version. The Chinese version is at [SKILL.md](SKILL.md). Output language follows the user's language: if the user writes in English, respond in English; if in Chinese, respond in Chinese. CVE IDs, commands, and code remain as-is.
+In Claw product conversations, you must explicitly tell the user **which online capabilities actually ran, which were skipped, and which were unavailable**.
+
+Cloud URL is configurable: `export CLAWLOCK_CLOUD_URL=https://your-instance`.
+
+---
+
+## Pre-Run Safety Reminder
+
+Before actually calling `clawlock`, perform these minimum checks:
+
+1. Confirm the `clawlock` binary being invoked is the expected installation, not an old copy or a same-name wrapper script.
+2. Confirm the scan target is exactly what the user asked for; do not accidentally point a test command at production endpoints or unrelated directories.
+3. If the user wants a local-first or offline evaluation, disable optional online capabilities before proceeding.
+4. If running red-team checks, confirm the current environment is allowed to reach the target endpoint and that the target is appropriate for security testing.
+
+---
+
+## Degradation And Skip Rules
+
+In Claw product conversations, gracefully degrade and explain the reason in all of the following cases:
+
+- CVE API unavailable: continue the remaining local checks and explicitly say "online CVE matching was not completed for this run".
+- Skill cloud intelligence unavailable: continue local static analysis and explicitly say "cloud intelligence unavailable; conclusion based on local rules only".
+- `--llm` not enabled, API key missing, or LLM request failed: keep the local Agent-Scan results and explicitly say the LLM semantic assessment did not run, or why it failed.
+- Node.js / promptfoo / npx / endpoint missing: skip red-team and explicitly say it was skipped and why.
+- If any check is skipped, failed, or unavailable, **never** rewrite that state as "passed" or "no issues found".
 
 ---
 
 ## Feature 1: Full Security Scan
 
-Runs 9 sequential steps silently, then outputs a unified report.
+Runs 7 core security domains concurrently. If `--endpoint` is provided and
+`--no-redteam` is not set, ClawLock appends an optional Step 8 red-team stage
+after the core scan, then outputs one unified report.
 
 ```bash
 clawlock scan                                    # Auto-detect platform
@@ -126,21 +140,21 @@ Reads Claw config files, runs built-in audit (if available), then applies ClawLo
 
 | Risk | Trigger | Level |
 |------|---------|-------|
-| Gateway auth | `gatewayAuth: false` | 🔴 Critical |
-| File access scope | `allowedDirectories` contains `/` | ⚠️ Medium |
-| Browser control | `enableBrowserControl: true` | ⚠️ Medium |
-| Network allowlist | `allowNetworkAccess: true` without domain list | ⚠️ Medium |
-| Service binding | `server.host: 0.0.0.0` | 🔴 High |
-| TLS status | `tls.enabled: false` | ⚠️ Medium |
-| Approval mode | `approvalMode: disabled` | ⚠️ Medium |
-| Rate limiting | `rateLimit.enabled: false` | ⚠️ Medium |
-| Hardcoded secrets | Regex matching 6 API key/token formats | 🔴 Critical |
-| Risky env vars | NODE_OPTIONS / LD_PRELOAD / DYLD_INSERT_LIBRARIES (11 vars) | 🔴 High |
-| Session retention | `sessionRetentionDays > 30` | ℹ️ Info |
+| Gateway auth | `gatewayAuth: false` | 🔴 Crit |
+| File access scope | `allowedDirectories` contains `/` | 🟡 Warn |
+| Browser control | `enableBrowserControl: true` | 🟡 Warn |
+| Network allowlist | `allowNetworkAccess: true` without domain list | 🟡 Warn |
+| Service binding | `server.host: 0.0.0.0` | 🔴 Crit |
+| TLS status | `tls.enabled: false` | 🟡 Warn |
+| Approval mode | `approvalMode: disabled` | 🟡 Warn |
+| Rate limiting | `rateLimit.enabled: false` | 🟡 Warn |
+| Hardcoded secrets | Regex matching 11 API key/token formats | 🔴 Crit |
+| Risky env vars | NODE_OPTIONS / LD_PRELOAD / DYLD_INSERT_LIBRARIES (11 vars) | 🟠 High |
+| Session retention | `sessionRetentionDays > 30` | 🔵 Info |
 
 **Interpretation rule:** Treat built-in audit findings as **configuration risk hints**, not as confirmed attacks. Use language like "there is a risk, recommend tightening".
 
-**Output rules:** Show both passing and failing items. Passing example: `✅ | Gateway auth | Enabled, external access requires credentials.` Each item = one sentence: status + impact + recommendation. Do not mix in findings from Steps 2-9.
+**Output rules:** Show both passing and failing items. Passing example: `✅ | Gateway auth | Enabled, external access requires credentials.` Each item = one sentence: status + impact + recommendation. Do not mix in findings from Steps 2-8.
 
 ### Step 2 — Process Detection + Port Exposure
 
@@ -150,9 +164,9 @@ Cross-platform detection of running Claw processes and externally exposed ports 
 
 Cross-platform check for overly permissive credential files/directories (Unix: stat bits, Windows: icacls ACL).
 
-### Step 4 — Skill Supply Chain (46 patterns)
+### Step 4 — Skill Supply Chain (63 patterns)
 
-Combines **cloud threat intelligence** + **local 46-pattern static analysis**.
+Combines **cloud threat intelligence** + **local 63-pattern static analysis**.
 
 #### 4.1 Cloud Intelligence
 
@@ -161,22 +175,22 @@ Combines **cloud threat intelligence** + **local 46-pattern static analysis**.
 | Verdict | Action |
 |---------|--------|
 | `safe` | Mark safe, continue local scan for confirmation |
-| `malicious` | 🔴 Critical, record reason |
+| `malicious` | 🔴 Crit, record reason |
 | `risky` | Combine with local analysis to determine level |
 | `unknown` | Local static scan only |
 | Request failed / timeout / non-200 / empty / invalid | Treat as unavailable, continue local scan, note "cloud intel unavailable" |
 
 **Resilience rules:** Cloud failure does not block the scan. One skill failure does not stop others.
 
-#### 4.2 Local Static Analysis (46 patterns)
+#### 4.2 Local Static Analysis (63 patterns)
 
-🔴 Critical (confirmed malicious): credential exfil (curl/wget) · reverse shell (bash/nc/Python/mkfifo) · crypto mining · destructive deletion · chmod 777 · prompt injection (override/hijack/jailbreak/Chinese) · obfuscated payloads (base64→shell) · zero-width chars · nested shell command obfuscation (`sh -c`/`bash -c`/`cmd /c` multi-layer wrapping to bypass detection)
+🔴 Crit (confirmed malicious): credential exfil (curl/wget) · reverse shell (bash/nc/Python/mkfifo) · crypto mining · destructive deletion · chmod 777 · prompt injection (override/hijack/jailbreak/Chinese) · obfuscated payloads (base64→shell) · zero-width chars · nested shell command obfuscation (`sh -c`/`bash -c`/`cmd /c` multi-layer wrapping to bypass detection)
 
-🔴 High signal: Unicode escape obfuscation · hardcoded credentials · AI API keys · dangerous env var export · cron persistence · DNS exfiltration · user input into eval · recursive deletion of system dirs
+🟠 High: Unicode escape obfuscation · hardcoded credentials · AI API keys · dangerous env var export · cron persistence · DNS exfiltration · user input into eval · recursive deletion of system dirs
 
-⚠️ Medium (elevated but potentially legitimate): eval/exec · subprocess · credential env vars · privacy directory access · system sensitive files · external HTTP requests · dynamic imports · ctypes/cffi · pickle deserialization · unsafe YAML · socket server · webhooks · service registration
+🟡 Warn (elevated but potentially legitimate): eval/exec · subprocess · credential env vars · privacy directory access · system sensitive files · external HTTP requests · dynamic imports · ctypes/cffi · pickle deserialization · unsafe YAML · socket server · webhooks · service registration
 
-**Judgment principle:** Escalate to 🔴 only with clear evidence of unauthorized access, exfiltration, destruction, or malicious intent. `eval`, `subprocess`, API key access **alone** = ⚠️ only. Combine "declared purpose × actual behavior × exfiltration path" for judgment.
+**Judgment principle:** Escalate to 🔴 Crit only with clear evidence of unauthorized access, exfiltration, destruction, or malicious intent. `eval`, `subprocess`, API key access **alone** = 🟡 Warn only. Combine "declared purpose × actual behavior × exfiltration path" for judgment.
 
 **Output rules:**
 - Risky skills: show permissions + purpose consistency + recommendation
@@ -192,22 +206,22 @@ Scans SOUL.md / CLAUDE.md / HEARTBEAT.md / MEMORY.md / memory/*.md:
 
 **Safety guardrails:** Do not read, enumerate, or summarize actual contents of albums, ~/Documents, ~/Downloads, chat history, or log files. Do not use sudo or sandbox escape attempts. Only read config metadata, permission states, and file hashes.
 
-### Step 6 — MCP Exposure + Implicit Tool Poisoning (6 patterns)
+### Step 6 — MCP Exposure + Implicit Tool Poisoning (10 risk signals)
 
 Scans MCP config files for:
 
 | Risk | Level |
 |------|-------|
-| Bound to 0.0.0.0 (external exposure) | 🔴 Critical |
-| Remote non-localhost endpoint | ⚠️ Medium |
-| Plaintext credentials in env | 🔴 High |
-| Risky env vars in env (NODE_OPTIONS etc.) | 🔴 High |
-| Parameter Tampering (ASR≈47%) | 🔴 Critical |
-| Function Hijacking (ASR≈37%) | 🔴 High |
-| Implicit Trigger (ASR≈27%) | 🔴 Critical |
-| Rug Pull indicators | ⚠️ Medium |
-| Tool Shadowing | 🔴 High |
-| Cross-origin Escalation | ⚠️ Medium |
+| Bound to 0.0.0.0 (external exposure) | 🔴 Crit |
+| Remote non-localhost endpoint | 🟡 Warn |
+| Plaintext credentials in env | 🔴 Crit |
+| Risky env vars in env (NODE_OPTIONS etc.) | 🟠 High |
+| Parameter Tampering (ASR≈47%) | 🔴 Crit |
+| Function Hijacking (ASR≈37%) | 🟠 High |
+| Implicit Trigger (ASR≈27%) | 🔴 Crit |
+| Rug Pull indicators | 🟡 Warn |
+| Tool Shadowing | 🟠 High |
+| Cross-origin Escalation | 🟡 Warn |
 
 Detection covers all LLM-visible fields: description · annotations · errorTemplate · outputTemplate · inputSchema parameter descriptions.
 
@@ -217,15 +231,11 @@ Queries ClawLock cloud vulnerability intelligence.
 
 **Resilience rules:** If the API is unavailable, clearly state "online CVE matching was not completed for this run, recommend retrying later". **Never claim "zero vulnerabilities found"** when intelligence is unavailable. Show max 8 most severe CVEs; note remaining count below table.
 
-### Step 8 — Cost Analysis
-
-Detect expensive models, high-frequency heartbeats, oversized max_tokens.
-
-### Step 9 — LLM Red-Team (optional, requires --endpoint)
+### Step 8 — LLM Red-Team (optional, requires --endpoint)
 
 9 agent-specific plugins × 8 attack strategies (including encoding bypass).
 
-> ⚠️ **External dependency:** This feature requires Node.js and promptfoo (`npm install -g promptfoo`). If the current environment cannot install it, skip this step — the remaining 8 scan steps remain fully functional. In Skill environments where Node.js is typically unavailable, this step auto-skips with an explanation.
+> ⚠️ **External dependency:** This feature requires Node.js and runs through `promptfoo` or `npx` (for example `npm install -g promptfoo`, or `npx promptfoo@latest`). If the current environment cannot install it, skip this step — the remaining 7 core scan steps remain fully functional. In Skill environments where Node.js is typically unavailable, this step auto-skips with an explanation.
 
 ---
 
@@ -254,7 +264,7 @@ Collect minimum context for audit (do not generate lengthy background analysis):
 - Actual capabilities used: file read/write/delete · network access · shell/subprocess · sensitive access (env/credentials/privacy paths)
 - Declared permissions vs actually used permissions gap
 
-**Step 3 — Local static analysis:** Uses 46-pattern deterministic engine. Judgment principles same as Feature 1 Step 4.
+**Step 3 — Local static analysis:** Uses a 63-pattern deterministic engine. Judgment principles same as Feature 1 Step 4.
 
 ### Output format (strict — do not expand into full report)
 
@@ -280,7 +290,7 @@ clawlock precheck ./new-skill/SKILL.md
 ```
 
 6-dimension detection:
-1. **Prompt injection** — 46 malicious patterns (including Chinese)
+1. **Prompt injection** — 63 malicious patterns (including Chinese)
 2. **Shell deobfuscation** — recursively unwraps `sh -c`/`bash -c`/`cmd /c` nesting before matching
 3. **Sensitive permissions** — sudo/root/full disk/dangerous env vars
 4. **Suspicious URLs** — .xyz/.tk/.ml high-risk TLDs
@@ -293,8 +303,8 @@ clawlock precheck ./new-skill/SKILL.md
 
 ```bash
 clawlock harden              # Interactive
-clawlock harden --auto       # Non-breaking measures only
-clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
+clawlock harden --auto       # Apply safe actions + print manual guidance
+clawlock harden --auto-fix   # Auto-fix real safe local changes
 ```
 
 | ID | Measure | UX Impact | Confirm | Auto-fix |
@@ -309,8 +319,18 @@ clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
 | H008 | Enable approval mode | ⚠️ Each dangerous op needs confirm | Yes | No |
 | H009 | Tighten credential dir perms | None | No | ✅ Yes |
 | H010 | Configure rate limiting | None | No | No |
+| H011 | Block download-and-execute / runtime remote installs | ⚠️ Bootstrap scripts may stop | Yes | No |
+| H012 | Deny Windows LOLBins / script hosts | ⚠️ Windows admin scripts may stop | Yes | No |
+| H013 | Remove persistence footholds | ⚠️ Background jobs may stop | Yes | No |
+| H014 | Block tunnels / reverse proxies | ⚠️ Remote debug tunnels may stop | Yes | No |
+| H015 | Tighten MCP auth / bind / CORS | ⚠️ External MCP tools may need reconfig | Yes | No |
+| H016 | Disable user-controlled dynamic module loading | ⚠️ Hot-loaded plugins may stop | Yes | No |
+| H017 | Redact prompts and credentials from logs | ⚠️ Debug logs become less verbose | Yes | No |
+| H018 | Clean unsafe prompt / skill instructions | ⚠️ Unsafe automation wording may stop | Yes | No |
 
 **Rule: Measures requiring confirmation must display the UX impact in yellow, then wait for explicit `y`. Default is No.**
+
+**Execution note:** The wizard groups measures into **Safe to apply now**, **Recommended only**, and **Needs confirmation**. At present, only `H009` performs an actual local auto-fix. The other measures are guided hardening recommendations and should not be described as "applied" unless a real change happened.
 
 ---
 
@@ -319,75 +339,94 @@ clawlock harden --auto-fix   # Auto-fix (e.g. credential dir permissions)
 ```bash
 clawlock soul --update-baseline    # Update drift baseline
 clawlock discover                  # Discovery (~/.openclaw, ~/.zeroclaw, ~/.claude)
-clawlock redteam URL --deep        # Red-team (9 plugins × 8 strategies) ⚠️ requires promptfoo
+clawlock redteam URL --deep        # Red-team (10 plugins × 8 strategies) ⚠️ requires promptfoo / npx
 clawlock mcp-scan ./src            # MCP deep code scan (includes dependency CVE checks)
 clawlock agent-scan --code ./src   # OWASP ASI 14 categories (includes dependency CVE checks)
 clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment layer
 ```
 
-> **Dependency note:** All commands except `clawlock redteam` require only `pip install clawlock` — zero external binaries needed.
-> If ai-infra-guard binary is installed on the system, `mcp-scan` and `agent-scan` will automatically use it as an optional enhancement on top of the built-in engine results.
+> **Dependency note:** All commands except `clawlock redteam` require only `pip install clawlock` — zero external binaries needed. `clawlock redteam` needs Node.js and runs through `promptfoo` or `npx`.
+> `ai-infra-guard` is optional and currently only enhances `mcp-scan` when the binary is installed and both `--model` and `--token` are provided.
 
 ---
 
-## Full Report Output Specification
+## Feature 11: Scan History
 
-**The following applies ONLY to Feature 1 full scan**. Do not use for Feature 2-10 single-item responses.
-
-### Strict Output Boundary
-
-- Output must start from `# 🏥 ClawLock Security Scan Report` — no preamble, no progress narration
-- Fixed order: report header → Steps 1-9 → report footer
-- Do not append extra recommendation lists or interactive prompts after the footer
-- Remediation advice: only "upgrade to latest version" — no specific commands
-
-### Report Template
-
-```
-# 🏥 ClawLock Security Scan Report
-
-📅 {datetime}
-🖥️ {adapter} {version} · {OS}
-📦 Score {score}/100 · Grade {S/A/B/C/D} · {1-sentence risk summary}
-
-| Check | Status | Details |
-|-------|--------|---------|
-| Config audit | {✅/⚠️/🔴} | {short} |
-| Process detection | {✅/⚠️/🔴} | {short} |
-| Credential audit | {✅/⚠️/🔴} | {short} |
-| Skill supply chain | {✅/⚠️/🔴} | {N high M medium} |
-| Prompts & memory | {✅/⚠️/🔴} | {short} |
-| MCP exposure | {✅/⚠️/🔴} | {short} |
-| CVE matching | {✅/🔴/ℹ️ unavailable} | {short} |
-| Cost analysis | {✅/⚠️} | {short} |
-| Overall | {✅/⚠️/🔴} | {overall + 1-sentence recommendation} |
+```bash
+clawlock history            # View last 20 scan records
+clawlock history --limit 50 # View last 50
 ```
 
-### Per-Step Output Format
+Automatically records score, high-risk / needs-review counts, and device fingerprint for every `clawlock scan` run. Persistent storage at `~/.clawlock/scan_history.json`. Supports trend comparison (📈 improving / 📉 degrading).
 
-**Step 1 Config Audit:**
+## Feature 12: Watch Mode
 
-| Status | Check | Risk & Recommendation |
-|--------|-------|-----------------------|
-| ✅ | Gateway auth | Enabled, external access requires credentials. |
-| ⚠️ | File access scope | Includes root directory, recommend restricting to project directory. |
+```bash
+clawlock watch                    # Scan every 5 minutes, Ctrl+C to stop
+clawlock watch --interval 60      # Every 60 seconds
+clawlock watch --count 10         # Stop after 10 rounds
+```
 
-> All passing: ✅ No obvious configuration risks found.
+Periodically re-scans config drift + memory file drift + process changes. Alerts immediately when critical changes are detected. Suitable for long-term post-deployment monitoring.
 
-**Step 4 Skill Supply Chain (sorted by risk level):**
+---
 
-| Skill | Purpose | Permissions | Safety | Risk & Recommendation |
-|-------|---------|-------------|--------|----------------------|
-| `{name}` | {short} | {tags} | {✅/⚠️/🔴} | {short} |
-| `Remaining {N}` | Normal | Standard | ✅ | Monitor source and updates |
+## Claw Product Reporting Rules
 
-**Step 7 CVE (sorted by severity):**
+**The rules below apply to skill conversations in OpenClaw, ZeroClaw, Claude Code, and other compatible Claw products. Local CLI output remains the authoritative security output.**
 
-| Severity | ID | Cause & Impact |
-|----------|----|----------------|
-| 🔴 Critical | CVE-xxxx | {cause + impact} |
+### Source-of-Truth Principle
 
-> More than 8: show top 8. Note: {N} more, recommend upgrading.
+- **ClawLock performs the security evaluation. The LLM does not.**
+- In Claw product conversations, the LLM only explains impact, likely consequences, fix priority, and operational tradeoffs for end users.
+- Never recalculate, strengthen, weaken, or normalize ClawLock's verdict, score, grade, severity, or finding list.
+- If a value is not present in the current CLI output, do not infer it or build a synthetic replacement.
+
+### Input Preference by Feature
+
+- **Feature 1 full scan:** prefer `clawlock scan --format json`
+  - Current JSON reliably provides: `time`, `adapter`, `device`, `score`, `grade`, `domain_grades`, `domain_scores`, and flat `findings`
+- **Feature 2 single-skill audit:** prefer the default text output as the canonical conclusion
+  - Current `clawlock skill --format json` returns findings only; it does not include the user-facing conclusion / tone
+- **Feature 3 precheck / Feature 5 drift / other focus commands:** use default text output as the canonical result unless a structured summary format is added later
+- If both text and JSON are available, use text for the verdict and JSON only for structured finding details
+
+### Claw Product Output Contract
+
+Use two clearly separated parts:
+
+```md
+# ClawLock Result
+
+{quote or restate only facts already present in ClawLock output}
+
+### Impact Analysis
+
+{LLM explanation for a non-expert user: what could happen, what matters first, what to do next}
+```
+
+Rules:
+
+- `ClawLock Result` may include exact score / grade / verdict / finding counts only when they appear in CLI output
+- For full scan, you may include `domain_grades` and `domain_scores` because they are present in `scan --format json`
+- Do not invent per-step counts, per-domain severity totals, fixed Step 1-8 tables, or any other fields that current output does not provide
+- Do not copy box-drawing, terminal colors, progress bars, or large raw CLI blocks into chat
+- Do not merge multiple commands into a new synthetic "master report"; keep each command's result distinct
+
+### Feature-Specific Reporting Pattern
+
+- **Feature 1 full scan:** quote exact `score`, `grade`, available domain grades / scores, and the highest-priority findings from ClawLock; then explain impact
+- **Feature 2 / 3 / 5 single-target checks:** quote ClawLock's conclusion sentence first, then explain impact in plain language
+- **If the command says a check was skipped or unavailable, keep that wording.** Do not upgrade "skipped" into "passed", and do not downgrade "risk found" into "needs review"
+
+### Allowed vs Prohibited
+
+| ✅ Allowed | ❌ Prohibited |
+|-----------|-------------|
+| Quote ClawLock's exact verdict / score / grade when present | Recompute a different score, grade, or overall verdict |
+| Explain likely impact in plain language | Add findings that ClawLock did not report |
+| Prioritize fixes for the user | Remove findings or downplay reported severity |
+| Note static-analysis limits or skipped checks | Invent tables, counts, or step summaries not present in output |
 
 ---
 
@@ -405,6 +444,22 @@ clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment l
 
 ---
 
+## Language Adaptation
+
+This is the English version. The Chinese version is at [SKILL.md](SKILL.md). Output language follows the user's language: if the user writes in English, respond in English; if in Chinese, respond in Chinese. CVE IDs, commands, and code remain as-is.
+
+## Scan Start Prompt
+
+Before starting any scan (Features 1–10), output a single startup line:
+
+```
+🔍 ClawLock scanning {target} for security issues, please wait...
+```
+
+Replace `{target}` with the actual target (e.g. `Claw environment`, `my-skill`, `current workspace`).
+
+---
+
 ## Capability Boundaries
 
 This skill performs **static analysis**. It cannot:
@@ -416,22 +471,3 @@ This skill performs **static analysis**. It cannot:
 Since v1.1, MCP deep scan and Agent-Scan use built-in Python engines (regex + AST taint tracking) with no external binary dependencies. The built-in engines detect known patterns; for complex cross-function semantic vulnerabilities, enable the LLM assessment layer via `--llm` (requires API key).
 
 All conclusions represent best-effort assessment within current check scope.
-
-## Feature 11: Scan History
-
-```bash
-clawlock history            # View last 20 scan records
-clawlock history --limit 50 # View last 50
-```
-
-Automatically records score, critical/warning counts, and device fingerprint for every `clawlock scan` run. Persistent storage at `~/.clawlock/scan_history.json`. Supports trend comparison (📈 improving / 📉 degrading).
-
-## Feature 12: Watch Mode
-
-```bash
-clawlock watch                    # Scan every 5 minutes, Ctrl+C to stop
-clawlock watch --interval 60      # Every 60 seconds
-clawlock watch --count 10         # Stop after 10 rounds
-```
-
-Periodically re-scans config drift + memory file drift + process changes. Alerts immediately when critical changes are detected. Suitable for long-term post-deployment monitoring.

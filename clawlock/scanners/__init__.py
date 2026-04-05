@@ -1,5 +1,5 @@
 """
-ClawLock v1.4.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.0.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -18,13 +18,6 @@ CRIT = "critical"
 HIGH = "high"
 WARN = "medium"
 INFO = "info"
-LEVEL_EMOJI = {CRIT: "HIGH", HIGH: "HIGH", WARN: "WARN", INFO: "INFO"}
-LEVEL_LABEL_CN = {
-    CRIT: t("高危", "HIGH"),
-    HIGH: t("高危", "HIGH"),
-    WARN: t("需关注", "WARN"),
-    INFO: t("提示", "INFO"),
-}
 
 
 @dataclass
@@ -37,18 +30,6 @@ class Finding:
     snippet: str = ""
     remediation: str = ""
     metadata: dict = field(default_factory=dict)
-
-    @property
-    def is_critical(self) -> bool:
-        return self.level in (CRIT, HIGH)
-
-    @property
-    def emoji(self) -> str:
-        return LEVEL_EMOJI.get(self.level, "•")
-
-    @property
-    def label_cn(self) -> str:
-        return LEVEL_LABEL_CN.get(self.level, self.level)
 
 
 _CONFIG_RULES: Dict[str, List[tuple]] = {
@@ -160,8 +141,13 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
 SECRET_PATTERNS = [
     ("sk-[A-Za-z0-9]{20,}", "OpenAI API Key"),
     ("ghp_[A-Za-z0-9]{36}", "GitHub PAT"),
+    ("github_pat_[A-Za-z0-9_]{20,}", "GitHub fine-grained PAT"),
+    ("gh(?:o|u)_[A-Za-z0-9]{20,}", "GitHub OAuth/User Token"),
+    ("tp-[A-Za-z0-9._-]{16,}", "Xiaomi MiMo Token Plan API Key"),
     ("xoxb-[0-9]{10,}", "Slack Token"),
+    ("xoxp-[0-9A-Za-z-]{10,}", "Slack User Token"),
     ("AKIA[0-9A-Z]{16}", "AWS Key"),
+    ("AIza[0-9A-Za-z\\-_]{35}", "Google API Key"),
     ("-----BEGIN (RSA |EC )?PRIVATE KEY-----", "Private Key"),
     ("sk-ant-[A-Za-z0-9\\-]{20,}", "Anthropic API Key"),
 ]
@@ -493,10 +479,28 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("凭证通过 curl 发送到外部。", "Credentials sent externally via curl."),
     ),
     (
+        "(?i)curl\\b[^|&;#\\n]*\\|\\s*(?:bash|sh)\\b",
+        CRIT,
+        t("下载即执行 (curl|shell)", "Download-and-execute (curl|shell)"),
+        t("远程脚本通过 curl 下载后立即交给 shell 执行。", "Remote script downloaded with curl and executed immediately by a shell."),
+    ),
+    (
         "wget\\b[^|&;#\\n]*\\$\\{?(?:TOKEN|API_KEY|SECRET|PASSWORD)\\}?",
         CRIT,
         t("凭证外传 (wget)", "Credential exfiltration (wget)"),
         t("凭证通过 wget 发送到外部。", "Credentials sent externally via wget."),
+    ),
+    (
+        "(?i)wget\\b[^|&;#\\n]*\\|\\s*(?:bash|sh)\\b",
+        CRIT,
+        t("下载即执行 (wget|shell)", "Download-and-execute (wget|shell)"),
+        t("远程脚本通过 wget 下载后立即交给 shell 执行。", "Remote script downloaded with wget and executed immediately by a shell."),
+    ),
+    (
+        "(?i)(?:Invoke-WebRequest|iwr)\\b[^|&;#\\n]*\\|\\s*(?:iex|Invoke-Expression)\\b",
+        CRIT,
+        t("下载即执行 (PowerShell)", "Download-and-execute (PowerShell)"),
+        t("PowerShell 远程内容下载后立即通过 iex 执行。", "PowerShell downloads remote content and executes it immediately via iex."),
     ),
     (
         "bash\\s+-i\\s+>?&?\\s*/dev/tcp/",
@@ -541,6 +545,24 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("重置 LLM 角色。", "LLM role reset attempt."),
     ),
     (
+        "(?i)(?:show|print|reveal|dump|display|output)\\s+(?:your\\s+)?(?:system\\s+prompt|developer\\s+message|hidden\\s+instructions?|internal\\s+(?:rules|instructions))",
+        HIGH,
+        t("提示词注入：提取系统提示词", "Prompt injection: system prompt extraction"),
+        t("尝试诱导模型输出系统提示词或内部规则。", "Attempts to coerce the model into revealing its system prompt or internal rules."),
+    ),
+    (
+        "(?i)(?:do\\s+not|don't)\\s+(?:ask|request)\\s+(?:for\\s+)?(?:approval|confirmation|permission)|(?:assume|treat\\s+it\\s+as)\\s+(?:approval|permission)\\s+(?:is|was)\\s+(?:already\\s+)?granted",
+        HIGH,
+        t("提示词注入：审批绕过", "Prompt injection: approval bypass"),
+        t("试图要求模型跳过审批/确认流程。", "Attempts to make the model skip approval or confirmation flows."),
+    ),
+    (
+        "(?i)(?:before\\s+(?:replying|responding|answering)|without\\s+explaining)\\b.{0,80}\\b(?:call|invoke|run)\\s+(?:the\\s+)?tool\\b",
+        WARN,
+        t("强制优先调用工具", "Forced tool invocation before reply"),
+        t("文本要求模型在回复前先执行工具调用。", "Text instructs the model to invoke a tool before replying."),
+    ),
+    (
         "(?i)(?:jailbreak|dan\\s+mode|developer\\s+mode|do\\s+anything\\s+now|skeleton\\s+key)",
         CRIT,
         t("越狱关键词", "Jailbreak keywords"),
@@ -577,6 +599,12 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("提取系统提示词。", "System prompt extraction attempt."),
     ),
     (
+        "(不要|别)(再)?(请求|询问)(审批|确认|授权)|(默认|视为)(已经)?(获得|有)(审批|授权)",
+        HIGH,
+        t("提示词注入：审批绕过 (中文)", "Prompt injection: approval bypass (Chinese)"),
+        t("试图要求模型跳过审批或视为已授权。", "Attempts to make the model skip approval or assume permission was granted."),
+    ),
+    (
         "(你现在是|从现在开始你是|扮演|假装)(一个)?",
         WARN,
         t("疑似角色劫持 (中文)", "Suspected role hijacking (Chinese)"),
@@ -601,6 +629,12 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("发现 API key 格式字符串。", "API key format string detected."),
     ),
     (
+        "(?i)(?:github_pat_[A-Za-z0-9_]{20,}|gh(?:o|u)_[A-Za-z0-9]{20,}|tp-[A-Za-z0-9._-]{16,}|AIza[0-9A-Za-z\\-_]{35}|xoxp-[0-9A-Za-z-]{10,}|_authToken\\s*=\\s*[A-Za-z0-9._-]{20,})",
+        HIGH,
+        t("疑似平台访问令牌", "Suspected platform access token"),
+        t("发现 GitHub / Google / Slack / npm / Xiaomi MiMo Token Plan 等平台访问令牌格式字符串。", "Detected a token-like string for GitHub, Google, Slack, npm, Xiaomi MiMo Token Plan, or another platform."),
+    ),
+    (
         "(?i)(?:export|setenv|ENV)\\s+(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)\\s*=",
         HIGH,
         t("设置危险环境变量", "Dangerous env var being set"),
@@ -619,10 +653,46 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("通过 crontab 写入持久化任务。", "Persistent task written via crontab."),
     ),
     (
+        "(?i)\\bschtasks(?:\\.exe)?\\b[^\\n]{0,80}/create\\b",
+        HIGH,
+        t("计划任务持久化", "Scheduled task persistence"),
+        t("通过 Windows 计划任务注册持久化执行。", "Registers persistence via Windows scheduled tasks."),
+    ),
+    (
+        "(?i)(?:HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER)\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run(?:Once)?",
+        HIGH,
+        t("注册表自启动持久化", "Registry autorun persistence"),
+        t("写入 Windows Run/RunOnce 自启动注册表项。", "Writes to Windows Run/RunOnce autorun registry keys."),
+    ),
+    (
         "(?i)(?:systemctl\\s+enable|launchctl\\s+load)\\s+",
         WARN,
         t("注册系统服务", "System service registration"),
         t("注册持久化系统服务。", "Persistent system service registered."),
+    ),
+    (
+        "(?i)(?:launchctl\\s+(?:load|bootstrap)|~/Library/LaunchAgents|/Library/LaunchAgents)",
+        HIGH,
+        t("LaunchAgent 持久化", "LaunchAgent persistence"),
+        t("通过 macOS LaunchAgents 注册持久化任务。", "Registers persistence through macOS LaunchAgents."),
+    ),
+    (
+        "(?i)(?:~?/\\.config/systemd/user|systemctl\\s+--user\\s+(?:enable|start))",
+        HIGH,
+        t("用户级 systemd 持久化", "User-level systemd persistence"),
+        t("通过用户级 systemd 单元注册持久化任务。", "Registers persistence through user-level systemd units."),
+    ),
+    (
+        "(?i)(?:~?/\\.termux/boot|/data/data/com\\.termux/files/home/\\.termux/boot|\\btermux-job-scheduler\\b)",
+        HIGH,
+        t("Termux 持久化", "Termux persistence"),
+        t("通过 Termux 启动脚本或 termux-job-scheduler 注册持久化任务。", "Registers persistence through Termux boot scripts or termux-job-scheduler."),
+    ),
+    (
+        "(?i)\\b(?:mshta|regsvr32|rundll32|certutil|bitsadmin|wmic)(?:\\.exe)?\\b",
+        HIGH,
+        t("Windows LOLBin 执行链", "Windows LOLBin execution chain"),
+        t("检测到常见 Windows LOLBin（系统自带执行器）调用。", "Detected use of common Windows LOLBins (built-in execution helpers)."),
     ),
     ("\\beval\\s*\\(", WARN, t("使用 eval()", "eval() usage"), t("动态代码执行。", "Dynamic code execution.")),
     ("\\bexec\\s*\\(", WARN, t("使用 exec()", "exec() usage"), t("exec() 执行任意代码。", "exec() executes arbitrary code.")),
@@ -656,7 +726,19 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("外部网络请求", "External network request"),
         t("发起 HTTP 请求，确认目标是否可控。", "HTTP request made; verify target is not user-controlled."),
     ),
+    (
+        "(?i)(?:open|readFile|readFileSync|cat)\\s*\\(?[^\\n]*(?:\\.npmrc|\\.pypirc|\\.netrc)\\b",
+        WARN,
+        t("访问包管理器凭证文件", "Accessing package-manager credential file"),
+        t("代码尝试访问 .npmrc / .pypirc / .netrc 等凭证文件。", "Code attempts to access .npmrc, .pypirc, .netrc, or similar credential files."),
+    ),
     ("(?i)__import__\\s*\\(", WARN, t("动态模块导入", "Dynamic module import"), t("运行时动态导入。", "Runtime dynamic import.")),
+    (
+        "(?i)importlib\\.import_module\\s*\\([^\\n]*(?:input|user|arg|param|plugin|module)|\\brequire\\s*\\([^\\n]*(?:args|params|input|plugin|module)",
+        HIGH,
+        t("用户输入控制动态模块加载", "User input controls dynamic module loading"),
+        t("动态导入或 require 的模块名可能来自用户输入。", "Dynamic import or require may be controlled by user input."),
+    ),
     (
         "(?i)(?:ctypes|cffi)\\.",
         WARN,
@@ -736,6 +818,18 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("向非本地 URL 发起请求。", "Request to non-local URL."),
     ),
     (
+        "(?i)\\bssh\\b[^\\n]{0,80}\\s-R\\s|\\bngrok\\b|\\bcloudflared\\b[^\\n]{0,40}\\btunnel\\b|\\bfrpc\\b",
+        HIGH,
+        t("外联隧道/反向代理", "Outbound tunnel or reverse proxy"),
+        t("检测到反向隧道或外联代理工具，可能建立隐蔽通信通道。", "Detected a reverse tunnel or outbound proxy tool that may create a covert communication channel."),
+    ),
+    (
+        "(?i)\\b(?:npx|uvx|pipx\\s+run|npm\\s+exec)\\b|\\bpip\\s+install\\s+git\\+https?://",
+        WARN,
+        t("运行时拉取外部依赖", "Runtime external dependency fetch"),
+        t("运行时通过远程源拉取并执行外部依赖，存在供应链风险。", "Fetches and executes external dependencies at runtime, creating supply-chain risk."),
+    ),
+    (
         "(?i)(?:dns|nslookup|dig)\\s+.*\\$",
         HIGH,
         t("DNS 外传 (DNS exfiltration)", "DNS exfiltration"),
@@ -777,7 +871,7 @@ def scan_skill(skill_path: Path) -> List[Finding]:
         if "node_modules" in str(f) or ".git" in str(f):
             continue
         try:
-            content = f.read_text(errors="ignore")
+            content = f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
         for i, line in enumerate(content.splitlines(), 1):
@@ -883,23 +977,64 @@ SOUL_INJECTION_PATTERNS: List[Tuple[str, str, str]] = [
         WARN,
         t("要求模型隐藏指令", "Instructs model to hide instructions"),
     ),
+    (
+        "(?i)(?:show|print|reveal|dump|display|output)\\s+(?:your\\s+)?(?:system\\s+prompt|developer\\s+message|hidden\\s+instructions?|internal\\s+(?:rules|instructions))",
+        HIGH,
+        t("提取系统提示词", "System prompt extraction"),
+    ),
+    (
+        "(?:(不要|别)(再)?(请求|询问)(审批|确认|授权)|(默认|视为)(已经)?(获得|有)(审批|授权))|(?i:(?:do\\s+not|don't)\\s+(?:ask|request)\\s+(?:for\\s+)?(?:approval|confirmation|permission)|(?:assume|treat\\s+it\\s+as)\\s+(?:approval|permission)\\s+(?:is|was)\\s+(?:already\\s+)?granted)",
+        HIGH,
+        t("审批绕过指令", "Approval bypass instruction"),
+    ),
+    (
+        "(?i)(?:before\\s+(?:replying|responding|answering)|without\\s+explaining).{0,80}(?:call|invoke|run)\\s+(?:the\\s+)?tool",
+        WARN,
+        t("优先工具调用指令", "Tool-first instruction"),
+    ),
 ]
 HASH_STORE = Path.home() / ".clawlock" / "drift_hashes.json"
+_HASH_CACHE: dict | None = None
+_HASH_CACHE_PATH: Path | None = None
+
+
+def _hash_cache_matches() -> bool:
+    return _HASH_CACHE_PATH == HASH_STORE
 
 
 def _load_hashes() -> dict:
-    HASH_STORE.parent.mkdir(parents=True, exist_ok=True)
-    if HASH_STORE.exists():
-        try:
-            return json.loads(HASH_STORE.read_text())
-        except Exception:
-            pass
+    global _HASH_CACHE, _HASH_CACHE_PATH
+
+    if _HASH_CACHE is not None and _hash_cache_matches():
+        return dict(_HASH_CACHE)
+
+    try:
+        HASH_STORE.parent.mkdir(parents=True, exist_ok=True)
+        if HASH_STORE.exists():
+            _HASH_CACHE = json.loads(HASH_STORE.read_text())
+            _HASH_CACHE_PATH = HASH_STORE
+            return dict(_HASH_CACHE)
+    except Exception:
+        pass
+
+    _HASH_CACHE = {}
+    _HASH_CACHE_PATH = HASH_STORE
     return {}
 
 
 def _save_hashes(d: dict):
-    HASH_STORE.parent.mkdir(parents=True, exist_ok=True)
-    HASH_STORE.write_text(json.dumps(d, indent=2))
+    global _HASH_CACHE, _HASH_CACHE_PATH
+
+    _HASH_CACHE = dict(d)
+    _HASH_CACHE_PATH = HASH_STORE
+    try:
+        HASH_STORE.parent.mkdir(parents=True, exist_ok=True)
+        HASH_STORE.write_text(json.dumps(d, indent=2))
+    except Exception:
+        # Drift baselines are best-effort; permission errors should not block
+        # the main scan or prompt integrity checks.
+        return False
+    return True
 
 
 def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
@@ -907,7 +1042,7 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
     findings = []
     if not filepath.exists():
         return findings
-    content = filepath.read_text(errors="ignore")
+    content = filepath.read_text(encoding="utf-8", errors="ignore")
     for i, line in enumerate(content.splitlines(), 1):
         for pattern, level, title in SOUL_INJECTION_PATTERNS:
             if re.search(pattern, line):
@@ -1016,6 +1151,24 @@ _MCP_ITP = [
         WARN,
         t("MCP 跨域权限提升", "MCP cross-origin privilege escalation"),
         t("声明来自另一服务器的权限。", "Claims permissions from another server."),
+    ),
+    (
+        "(?i)(?:show|print|reveal|dump|display|output).{0,40}(?:system\\s+prompt|developer\\s+message|internal\\s+(?:rules|instructions))",
+        HIGH,
+        t("隐式工具投毒: 提取系统提示词", "Implicit tool poisoning: system prompt extraction"),
+        t("工具描述试图诱导模型输出系统提示词或内部规则。", "Tool description attempts to coerce the model into revealing its system prompt or internal rules."),
+    ),
+    (
+        "(?i)(?:do\\s+not|don't)\\s+(?:ask|request)\\s+(?:for\\s+)?(?:approval|confirmation|permission)|(?:assume|treat\\s+it\\s+as)\\s+(?:approval|permission)\\s+(?:is|was)\\s+(?:already\\s+)?granted",
+        HIGH,
+        t("隐式工具投毒: 审批绕过", "Implicit tool poisoning: approval bypass"),
+        t("工具描述要求跳过审批或视为已获授权。", "Tool description asks the model to bypass approval or assume permission was granted."),
+    ),
+    (
+        "(?i)(?:before\\s+(?:replying|responding|answering)|without\\s+explaining).{0,80}(?:call|invoke|run)\\s+(?:the\\s+)?tool",
+        WARN,
+        t("隐式工具投毒: 强制工具优先", "Implicit tool poisoning: forced tool-first behavior"),
+        t("工具描述要求模型在回复前优先执行工具调用。", "Tool description instructs the model to invoke a tool before replying."),
     ),
 ]
 
@@ -1134,7 +1287,7 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
     findings: List[Finding] = []
     if not skill_md_path.exists():
         return (findings, True)
-    content = skill_md_path.read_text(errors="ignore")
+    content = skill_md_path.read_text(encoding="utf-8", errors="ignore")
     skill_name = (
         skill_md_path.parent.name
         if skill_md_path.name == "SKILL.md"

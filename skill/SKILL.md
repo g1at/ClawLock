@@ -5,11 +5,11 @@ description: >
   当用户明确要求安全扫描、安全体检、安全加固时触发：
   「开始安全体检」「安全扫描」「检查 skill 安全」「安全加固」「探测实例」
   「scan my claw」「security check」「drift detection」「red team」「红队测试」
-  「React2Shell」「agent-scan」「发现安装」「凭证权限」「cost analysis」
+  「React2Shell」「agent-scan」「发现安装」「凭证权限」
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "1.4.0"
+    version: "2.0.0"
     homepage: "https://github.com/g1at/clawlock"
     author: "g1at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -20,10 +20,7 @@ metadata:
       bins:
         - clawlock    # 主二进制，配合 autoAllowSkills 可自动授权
       bins_optional:
-        - promptfoo   # 仅 Feature 7 红队测试需要，其余功能完全零外部依赖
-    note: >
-      MCP 深度扫描和 Agent-Scan 已内建引擎，不再需要 ai-infra-guard 二进制。
-      如果系统中已安装 ai-infra-guard，会自动作为可选增强使用。
+        - promptfoo
 ---
 
 # ClawLock
@@ -39,29 +36,14 @@ metadata:
 
 ```bash
 pip install clawlock          # 安装
-clawlock scan                 # 全面 9 步扫描
+clawlock scan                 # 全面安全扫描
 clawlock discover             # 发现所有安装实例
 clawlock precheck ./SKILL.md  # 新 skill 导入预检
-clawlock harden --auto-fix    # 加固（自动修复安全项）
+clawlock harden --auto-fix    # 加固（自动修复真正安全的本地变更）
 clawlock scan --format html   # HTML 报告
 ```
 
-作为 Claw Skill 安装：复制本文件到 skills 目录，对话中说「开始安全体检」。
-
----
-
-## 隐私声明
-
-绝大多数检查在**本地运行**，仅以下场景发起网络请求：
-
-| 请求场景 | 发送数据 | 绝不发送 | 依赖 |
-|----------|----------|----------|------|
-| CVE 情报查询 | 产品名（固定字符串）+ 版本号 | 无文件内容、无凭证、无会话记录 | 无（内建） |
-| Skill 威胁情报查询 | skill 名称 + 来源标签 | 无代码内容、无用户数据 | 无（内建） |
-| Agent-Scan LLM 语义评估（可选） | 代码片段（截断到 8K 字符） | 无完整源码、无凭证 | 需 `--llm` + API key |
-| promptfoo 红队测试（可选） | 测试 Prompt 载荷 | 无本地文件 | 需安装 promptfoo |
-
-使用 `--no-cve` 完全禁用网络请求。云端地址可自定义：`export CLAWLOCK_CLOUD_URL=https://your-instance`。
+作为 Claw Skill 安装：复制本文件到 skills 目录，并在对应 Claw 产品对话中发起安全检查请求。
 
 ---
 
@@ -77,7 +59,7 @@ clawlock scan --format html   # HTML 报告
 | 加固 / 收紧配置 | **Feature 4: 安全加固向导** | 无 |
 | SOUL.md / Memory 文件 drift | **Feature 5: Drift 检测** | 无 |
 | 发现系统上的安装 | **Feature 6: 安装发现** | 无 |
-| 红队 / jailbreak 测试 | **Feature 7: LLM 红队测试** | ⚠️ 需 promptfoo |
+| 红队 / jailbreak 测试 | **Feature 7: LLM 红队测试** | ⚠️ 需 Node.js + promptfoo / npx |
 | MCP 服务器是否安全 | **Feature 8: MCP 深度扫描** | 无（内建引擎） |
 | React2Shell / CVE-2025-55182 | **Feature 9: 依赖漏洞检查（并入代码扫描）** | 无 |
 | Agent 多智能体安全扫描 | **Feature 10: Agent-Scan** | 无（内建引擎） |
@@ -88,25 +70,57 @@ clawlock scan --format html   # HTML 报告
 
 ---
 
-## 扫描启动提示
+## 隐私声明
 
-在开始任何扫描（Feature 1–10）前，必须先输出一行启动提示：
+绝大多数检查在**本地运行**。只有在对应功能被启用时，才会发起以下网络请求：
 
-```
-🔍 ClawLock 正在检测 {目标} 安全性，请稍候...
-```
+| 请求场景 | 发送数据 | 绝不发送 | 依赖 |
+|----------|----------|----------|------|
+| CVE 情报查询 | 产品名（固定字符串）+ 版本号 | 无文件内容、无凭证、无会话记录 | 无（内建） |
+| Skill 威胁情报查询 | skill 名称 + 来源标签 | 无代码内容、无用户数据 | 无（内建） |
+| Agent-Scan LLM 语义评估（可选） | 代码片段（截断到 8K 字符） | 无完整源码、无凭证 | 需 `--llm` + API key |
+| promptfoo 红队测试（可选） | 测试 Prompt 载荷 | 无本地文件 | 需 Node.js，并通过 promptfoo 或 npx 运行 |
 
-将 `{目标}` 替换为实际内容（如 `OpenClaw 环境`、`my-skill`、`http://server:3000`）。
+离线优先写法：
 
-## 语言适配
+- 全量扫描离线：`clawlock scan --no-cve --no-redteam`
+- 单体审计离线：`clawlock skill /path/to/skill --no-cloud`
+- 如未启用 `--llm`，Agent-Scan 不会发起 LLM 请求
 
-本 SKILL.md 为中文版本，配套英文版 [SKILL_EN.md](SKILL_EN.md)。输出语言跟随用户语言：用户用中文提问，输出中文；用户用英文提问，输出英文。CVE ID、命令、代码等专有名词保持原文。
+在 Claw 产品对话里，必须明确告诉用户：**本次哪些在线能力实际运行了，哪些被跳过了，哪些暂不可用。**
+
+云端地址可自定义：`export CLAWLOCK_CLOUD_URL=https://your-instance`。
+
+---
+
+## 执行前安全提醒
+
+在实际调用 `clawlock` 前，先做以下最小核对：
+
+1. 确认当前要调用的 `clawlock` 就是预期安装版本，不要误用同名脚本或旧版本二进制。
+2. 确认扫描目标是用户明确指定的对象，不要把测试命令误打到生产地址或无关目录。
+3. 如用户明确要求本地优先或离线评估，优先关闭可选在线能力，再继续执行。
+4. 如运行红队测试，先确认当前环境允许访问目标端点，且该目标确实适合做安全测试。
+
+---
+
+## 降级与跳过规则
+
+在 Claw 产品对话场景中，遇到以下情况时必须优雅降级，并把原因写清楚：
+
+- CVE 接口不可用：继续其余本地扫描，并明确写「本次未完成在线 CVE 匹配」。
+- Skill 云端情报不可用：继续本地静态分析，并明确写「云端情报暂不可用，本结论基于本地规则」。
+- 未启用 `--llm`、缺少 API key，或模型请求失败：保留本地 Agent-Scan 结果，并明确写「LLM 语义评估未执行」或失败原因。
+- 缺少 Node.js / promptfoo / npx / endpoint：跳过红队测试，并明确写「红队测试已跳过」及原因。
+- 任何检查被跳过、失败或暂不可用时，都**不得**改写成“已通过”或“未发现问题”。
 
 ---
 
 ## Feature 1: 全量安全扫描
 
-执行 9 步顺序扫描，全部静默完成，最后输出统一报告。
+并发执行 7 个核心安全域扫描；如果提供了 `--endpoint` 且没有传
+`--no-redteam`，ClawLock 会在核心扫描完成后追加可选的第 8 步红队测试，
+最后输出一份统一报告。
 
 ```bash
 clawlock scan                                    # 自动识别平台
@@ -124,21 +138,21 @@ clawlock scan --no-cve                           # 离线模式
 
 | 风险项 | 触发条件 | 等级 |
 |--------|---------|------|
-| Gateway 鉴权 | `gatewayAuth: false` | 🔴 高危 |
-| 文件访问范围 | `allowedDirectories` 含 `/` | ⚠️ 需关注 |
-| 浏览器控制 | `enableBrowserControl: true` | ⚠️ 需关注 |
-| 网络白名单 | `allowNetworkAccess: true` 无白名单 | ⚠️ 需关注 |
-| 服务绑定 | `server.host: 0.0.0.0` | 🔴 高危 |
-| TLS 状态 | `tls.enabled: false` | ⚠️ 需关注 |
-| 操作审批 | `approvalMode: disabled` | ⚠️ 需关注 |
-| 速率限制 | `rateLimit.enabled: false` | ⚠️ 需关注 |
-| 硬编码凭证 | 正则匹配 6 种 API Key / Token 格式 | 🔴 高危 |
-| 危险环境变量 | NODE_OPTIONS / LD_PRELOAD / DYLD_INSERT_LIBRARIES 等 11 个 | 🔴 高危 |
-| 会话保留 | `sessionRetentionDays > 30` | ℹ️ 提示 |
+| Gateway 鉴权 | `gatewayAuth: false` | 🔴 严重 |
+| 文件访问范围 | `allowedDirectories` 含 `/` | 🟡 警告 |
+| 浏览器控制 | `enableBrowserControl: true` | 🟡 警告 |
+| 网络白名单 | `allowNetworkAccess: true` 无白名单 | 🟡 警告 |
+| 服务绑定 | `server.host: 0.0.0.0` | 🔴 严重 |
+| TLS 状态 | `tls.enabled: false` | 🟡 警告 |
+| 操作审批 | `approvalMode: disabled` | 🟡 警告 |
+| 速率限制 | `rateLimit.enabled: false` | 🟡 警告 |
+| 硬编码凭证 | 正则匹配 11 种 API Key / Token 格式 | 🔴 严重 |
+| 危险环境变量 | NODE_OPTIONS / LD_PRELOAD / DYLD_INSERT_LIBRARIES 等 11 个 | 🟠 高危 |
+| 会话保留 | `sessionRetentionDays > 30` | 🔵 信息 |
 
 **解读规则：** 将内建审计发现视为**配置风险提示**，不直接映射为「确认的严重攻击」。用「存在风险，建议收紧」的语气。
 
-**输出要求：** 安全项与风险项都要展示。安全项示例：`✅ | Gateway 鉴权 | 已开启，外部无法直接连接。` 每一项只写「当前状态 + 可能后果 + 建议」，不超过一行。不要混入来自 Step 2-9 的内容。
+**输出要求：** 安全项与风险项都要展示。安全项示例：`✅ | Gateway 鉴权 | 已开启，外部无法直接连接。` 每一项只写「当前状态 + 可能后果 + 建议」，不超过一行。不要混入来自 Step 2-8 的内容。
 
 ### Step 2 — 进程检测 + 端口暴露
 
@@ -150,7 +164,7 @@ clawlock scan --no-cve                           # 离线模式
 
 ### Step 4 — Skill 供应链风险扫描
 
-整合**云端威胁情报** + **本地 46 模式静态分析**。
+整合**云端威胁情报** + **本地 63 模式静态分析**。
 
 #### 4.1 云端情报查询
 
@@ -159,22 +173,22 @@ clawlock scan --no-cve                           # 离线模式
 | verdict | 处理方式 |
 |---------|---------|
 | `safe` | 标记安全，继续本地扫描确认 |
-| `malicious` | 🔴 高危，记录原因 |
+| `malicious` | 🔴 严重，记录原因 |
 | `risky` | 结合本地分析判断等级 |
 | `unknown` | 仅执行本地静态扫描 |
 | 请求失败 / 超时 / 非 200 / 空内容 / 无效 JSON | 视为不可用，继续本地扫描并标注「云端情报暂不可用」|
 
 **韧性规则：** 云端失败不阻断扫描。一个 skill 失败不阻止其他 skill。
 
-#### 4.2 本地静态分析（46 模式）
+#### 4.2 本地静态分析（63 模式）
 
-🔴 高危（确认恶意）：凭证外传(curl/wget) · 反弹Shell(bash/nc/Python/mkfifo) · 挖矿 · 批量删除 · chmod 777 · 提示词注入(覆盖/劫持/越狱/中文) · 混淆载荷(base64→shell) · 零宽字符 · Shell 命令嵌套混淆（`sh -c`/`bash -c`/`cmd /c` 多层包装绕过检测）
+🔴 严重（确认恶意）：凭证外传(curl/wget) · 反弹Shell(bash/nc/Python/mkfifo) · 挖矿 · 批量删除 · chmod 777 · 提示词注入(覆盖/劫持/越狱/中文) · 混淆载荷(base64→shell) · 零宽字符 · Shell 命令嵌套混淆（`sh -c`/`bash -c`/`cmd /c` 多层包装绕过检测）
 
-🔴 高信号：Unicode 转义混淆 · 硬编码凭证 · AI API 密钥 · 危险环境变量export · Cron持久化 · DNS外传 · 用户输入直接进eval · 递归删除系统目录
+🟠 高危：Unicode 转义混淆 · 硬编码凭证 · AI API 密钥 · 危险环境变量export · Cron持久化 · DNS外传 · 用户输入直接进eval · 递归删除系统目录
 
-⚠️ 需关注（高权限但可能合理）：eval/exec · subprocess · 凭证类环境变量 · 隐私目录访问 · 系统敏感文件 · 外部HTTP请求 · 动态模块导入 · ctypes/cffi · pickle反序列化 · 不安全YAML加载 · socket服务端 · webhook · 系统服务注册
+🟡 警告（高权限但可能合理）：eval/exec · subprocess · 凭证类环境变量 · 隐私目录访问 · 系统敏感文件 · 外部HTTP请求 · 动态模块导入 · ctypes/cffi · pickle反序列化 · 不安全YAML加载 · socket服务端 · webhook · 系统服务注册
 
-**判断原则：** 升级到 🔴 高危**必须**有明确越权、外传、破坏、恶意迹象之一。`eval`、`subprocess`、API 密钥读写**单独存在**时只判 ⚠️。结合「声明用途 × 实际行为 × 是否外传」综合判断。
+**判断原则：** 升级到 🔴 严重**必须**有明确越权、外传、破坏、恶意迹象之一。`eval`、`subprocess`、API 密钥读写**单独存在**时只判 🟡 警告。结合「声明用途 × 实际行为 × 是否外传」综合判断。
 
 **输出要求：**
 - 有风险的 skill 写清：权限 + 用途是否一致 + 建议
@@ -190,22 +204,22 @@ clawlock scan --no-cve                           # 离线模式
 
 **安全守则：** 不读取、不枚举相册 / ~/Documents / ~/Downloads / 聊天记录 / 日志正文。不执行 sudo / TCC 绕过 / 沙箱逃逸。仅读配置元数据、权限状态、文件哈希。
 
-### Step 6 — MCP 暴露面 + 隐式工具投毒（6 模式）
+### Step 6 — MCP 暴露面 + 隐式工具投毒（10 个风险信号）
 
 扫描 MCP 配置文件，检测：
 
 | 风险项 | 等级 |
 |--------|------|
-| 绑定 0.0.0.0（对外网暴露） | 🔴 高危 |
-| 连接非 localhost 远程端点 | ⚠️ 需关注 |
-| env 中含凭证字段（明文） | 🔴 高危 |
-| env 中含危险变量 (NODE_OPTIONS 等) | 🔴 高危 |
-| 参数篡改 (Parameter Tampering, ASR≈47%) | 🔴 高危 |
-| 函数劫持 (Function Hijacking, ASR≈37%) | 🔴 高危 |
-| 隐式触发器 (Implicit Trigger, ASR≈27%) | 🔴 高危 |
-| Rug Pull 迹象 | ⚠️ 需关注 |
-| 工具覆盖 (Tool Shadowing) | 🔴 高危 |
-| 跨域权限提升 | ⚠️ 需关注 |
+| 绑定 0.0.0.0（对外网暴露） | 🔴 严重 |
+| 连接非 localhost 远程端点 | 🟡 警告 |
+| env 中含凭证字段（明文） | 🔴 严重 |
+| env 中含危险变量 (NODE_OPTIONS 等) | 🟠 高危 |
+| 参数篡改 (Parameter Tampering, ASR≈47%) | 🔴 严重 |
+| 函数劫持 (Function Hijacking, ASR≈37%) | 🟠 高危 |
+| 隐式触发器 (Implicit Trigger, ASR≈27%) | 🔴 严重 |
+| Rug Pull 迹象 | 🟡 警告 |
+| 工具覆盖 (Tool Shadowing) | 🟠 高危 |
+| 跨域权限提升 | 🟡 警告 |
 
 检测覆盖所有 LLM 可见字段：description · annotations · errorTemplate · outputTemplate · inputSchema 参数描述。
 
@@ -215,15 +229,11 @@ clawlock scan --no-cve                           # 离线模式
 
 **韧性规则：** 接口不可用时，明确提示「本次未完成在线漏洞匹配，建议稍后重试」，**不输出「未发现漏洞」**。漏洞超过 8 个时只列最严重的 8 个，表后补充「另有 N 个，建议升级到最新版」。
 
-### Step 8 — 成本分析
-
-检测高价模型 · 高频心跳 · 过大 max_tokens 等 API 额度浪费项。
-
-### Step 9 — LLM 红队测试（可选，需 --endpoint）
+### Step 8 — LLM 红队测试（可选，需 --endpoint）
 
 9 个 agent 专项插件 × 8 种攻击策略（含编码绕过）。
 
-> ⚠️ **外部依赖：** 此功能需要 Node.js 环境和 promptfoo (`npm install -g promptfoo`)。如果当前环境无法安装，请跳过此步骤，不影响其余 8 步扫描的完整性。Skill 环境中通常无 Node.js，此步会自动跳过并提示原因。
+> ⚠️ **外部依赖：** 此功能需要 Node.js 环境，并通过 `promptfoo` 或 `npx` 运行（例如 `npm install -g promptfoo`，或直接使用 `npx promptfoo@latest`）。如果当前环境无法安装，请跳过此步骤，不影响其余 7 个核心扫描步骤的完整性。Skill 环境中通常无 Node.js，此步会自动跳过并提示原因。
 
 ---
 
@@ -252,7 +262,7 @@ clawlock skill /path/to/SKILL.md --no-cloud
 - 实际使用的能力：文件读写/删除 · 网络请求 · Shell/子进程 · 敏感访问 (env/凭证/隐私路径)
 - 声明权限 vs 实际使用权限的偏差
 
-**Step 3 — 本地静态分析：** 使用 46 模式引擎确定性扫描，判断原则同 Feature 1 Step 4。
+**Step 3 — 本地静态分析：** 使用 63 模式引擎确定性扫描，判断原则同 Feature 1 Step 4。
 
 ### 输出规范（严格执行，不展开成全量报告）
 
@@ -278,7 +288,7 @@ clawlock precheck ./new-skill/SKILL.md
 ```
 
 6 维度检测：
-1. **Prompt 注入** — 46 个恶意模式匹配（含中文）
+1. **Prompt 注入** — 63 个恶意模式匹配（含中文）
 2. **Shell 反混淆** — 递归解包 `sh -c`/`bash -c`/`cmd /c` 嵌套后再匹配
 3. **敏感权限声明** — sudo/root/全盘访问/危险环境变量
 4. **可疑 URL** — .xyz/.tk/.ml 等高风险 TLD
@@ -291,8 +301,8 @@ clawlock precheck ./new-skill/SKILL.md
 
 ```bash
 clawlock harden              # 交互式
-clawlock harden --auto       # 仅应用无破坏性措施
-clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
+clawlock harden --auto       # 应用安全动作并输出人工指导
+clawlock harden --auto-fix   # 自动修复真正安全的本地变更
 ```
 
 | ID | 措施 | 体验影响 | 需确认 | Auto-fix |
@@ -307,8 +317,18 @@ clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
 | H008 | 启用操作审批 | ⚠️ 每次高危操作需确认 | 是 | 否 |
 | H009 | 收紧凭证目录权限 | 无影响 | 否 | ✅ 是 |
 | H010 | 配置速率限制 | 无影响 | 否 | 否 |
+| H011 | 禁止下载即执行 / 运行时远程安装 | ⚠️ 自举安装脚本可能失效 | 是 | 否 |
+| H012 | 禁止 Windows LOLBins / 脚本宿主 | ⚠️ Windows 管理脚本可能失效 | 是 | 否 |
+| H013 | 清理持久化落点 | ⚠️ 后台任务可能停止 | 是 | 否 |
+| H014 | 禁止隧道 / 反向代理 | ⚠️ 远程调试隧道可能失效 | 是 | 否 |
+| H015 | 收紧 MCP 鉴权 / 绑定 / CORS | ⚠️ 外部 MCP 工具可能需重配 | 是 | 否 |
+| H016 | 禁止用户控制动态模块加载 | ⚠️ 热加载插件可能失效 | 是 | 否 |
+| H017 | 对提示词与凭证日志脱敏 | ⚠️ 调试日志会变少 | 是 | 否 |
+| H018 | 清理不安全 prompt / skill 指令 | ⚠️ 不安全自动化措辞会失效 | 是 | 否 |
 
 **规则：需二次确认的措施必须先向用户展示体验影响（黄色），等待明确 `y` 后才执行。默认 No。**
+
+**执行说明：** 加固向导会按「现在可安全应用 / 仅建议 / 需要确认」三组展示措施。当前只有 `H009` 会实际执行本地自动修复。其余措施主要提供配置或运维侧的加固指导，除非真的发生了改动，否则不要描述为“已应用”。
 
 ---
 
@@ -317,103 +337,16 @@ clawlock harden --auto-fix   # 自动修复（如凭证目录权限）
 ```bash
 clawlock soul --update-baseline    # Drift 基准更新
 clawlock discover                  # 安装发现 (~/.openclaw / ~/.zeroclaw / ~/.claude)
-clawlock redteam URL --deep        # 红队 (9 插件 × 8 策略) ⚠️ 需 promptfoo
+clawlock redteam URL --deep        # 红队 (10 插件 × 8 策略) ⚠️ 需 promptfoo / npx
 clawlock mcp-scan ./src            # MCP 深度代码扫描（含依赖漏洞 / React2Shell 检查）
 clawlock agent-scan --code ./src   # OWASP ASI 14 类别（含依赖漏洞 / React2Shell 检查）
 clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 ```
 
-> **依赖说明：** 除 `clawlock redteam` 需要 promptfoo (Node.js) 外，所有其他命令仅需 `pip install clawlock`，零外部二进制依赖。
-> 如果系统中安装了 ai-infra-guard 二进制，`mcp-scan` 和 `agent-scan` 会自动将其作为可选增强叠加到内建引擎结果上。
+> **依赖说明：** 除 `clawlock redteam` 需要 Node.js，并通过 `promptfoo` 或 `npx` 运行外，所有其他命令仅需 `pip install clawlock`，零外部二进制依赖。
+> `ai-infra-guard` 目前仅作为 `mcp-scan` 的可选增强，且只有在系统中安装了该二进制并显式传入 `--model` 与 `--token` 时才会启用。
 
 ---
-
-## 全量报告输出规范
-
-**以下规范仅适用于 Feature 1 全量扫描**，不用于 Feature 2–10 的单项回答。
-
-### 严格输出边界
-
-- 输出必须从 `# 🏥 ClawLock 安全扫描报告` 开始，前面**不得**添加任何说明、前言、进度播报
-- 报告固定顺序：报告头 → Step 1-9 → 报告尾
-- 除报告尾部外，不得追加额外建议列表或交互引导
-- 修复建议只写「更新到最新版」或「建议升级至 {版本}」，不给出具体升级命令
-
-### 报告模板
-
-```
-# 🏥 ClawLock 安全扫描报告
-
-📅 {日期时间}
-🖥️ {适配器} {版本} · {操作系统}
-📦 安全评分 {score}/100 · 等级 {S/A/B/C/D} · {1 句主要风险说明}
-
-| 检查项 | 状态 | 详情 |
-|--------|------|------|
-| 配置审计 | {✅/⚠️/🔴} | {短句} |
-| 进程检测 | {✅/⚠️/🔴} | {短句} |
-| 凭证审计 | {✅/⚠️/🔴} | {短句} |
-| Skill 供应链 | {✅/⚠️/🔴} | {N 高危 M 需关注} |
-| 提示词 & 记忆 | {✅/⚠️/🔴} | {短句} |
-| MCP 暴露面 | {✅/⚠️/🔴} | {短句} |
-| CVE 漏洞 | {✅/🔴/ℹ️ 暂不可用} | {短句} |
-| 成本分析 | {✅/⚠️} | {短句} |
-| 综合评估 | {✅/⚠️/🔴} | {总体 + 1 句建议} |
-```
-
-### 各 Step 输出格式
-
-**Step 1 配置审计：**
-
-| 状态 | 检查项 | 风险与建议 |
-|------|--------|------------|
-| ✅ | Gateway 鉴权 | 已开启，外部无法直接连接。|
-| ⚠️ | 文件访问范围 | 包含根目录，建议收紧到项目目录。|
-
-> 如果全部通过：✅ 未发现明显的配置风险。
-
-**Step 4 Skill 供应链（按风险等级排序）：**
-
-| Skill | 简介 | 权限 | 安全性 | 风险与建议 |
-|-------|------|------|--------|------------|
-| `{name}` | {短句} | {短标签} | {✅/⚠️/🔴} | {短句} |
-| `其余 {N} 个` | 功能正常 | 常规权限 | ✅ | 继续关注来源和更新 |
-
-**Step 7 CVE 漏洞（按严重程度排序）：**
-
-| 严重程度 | ID | 漏洞成因与危害 |
-|----------|----|----------------|
-| 🔴 严重 | CVE-xxxx | {成因 + 危害} |
-
-> 漏洞超过 8 个时只列最严重的 8 个。另有 {N} 个，建议升级到最新版。
-
----
-
-## 统一写作规则
-
-- **全部面向用户输出使用中文**（CVE ID、代码、命令除外）
-- 面向普通用户，少用专业词汇，用「会带来什么后果」「建议怎么做」的语气
-- 只使用 Markdown 标题、表格、引用和短段落；不使用 HTML 或复杂布局
-- 每个表格单元格尽量只写 1 句；最多「问题 + 建议」合并一句
-- 不在表格内换行成段
-- 不混用长句、项目符号清单和额外总结
-- 能用日常话说清楚的地方，不使用「暴露面」「攻防面」等抽象术语；改用「别人更容易从外网访问你的系统」这类描述
-- 不使用「绝对安全」「可放心使用」「已彻底解决」「没有任何风险」等绝对措辞
-- 单项审计（Feature 2）只输出简洁结论，**不展开成全量报告**
-
----
-
-## 能力边界声明
-
-本 skill 执行**静态分析**，无法：
-- 检测纯运行时的恶意行为
-- 保证不存在未知漏洞
-- 执行真实攻击或确认漏洞可利用性
-- 读取系统隐私目录、会话记录、媒体文件
-
-v1.1 起，MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + AST 污点追踪），无需安装 ai-infra-guard 二进制。内建引擎基于已知模式匹配，对复杂的跨函数语义漏洞覆盖有限；如需 LLM 驱动的语义级分析，可通过 `--llm` 选项启用（需要 API key）。
-
-所有结论均为「当前检查范围内」的最佳评估。
 
 ## Feature 11: 扫描历史
 
@@ -433,3 +366,106 @@ clawlock watch --count 10         # 扫描 10 轮后自动停止
 ```
 
 定期重扫配置 Drift + 记忆文件 Drift + 进程变化，发现高危变化时即时告警。适合部署后长期监控。
+
+---
+
+## Claw 产品对话输出规则
+
+**以下规则适用于 OpenClaw、ZeroClaw、Claude Code 与其他兼容 Claw 产品中的 skill 对话。安全判定以本地 ClawLock CLI 输出为准。**
+
+### 单一事实来源原则
+
+- **ClawLock 负责做安全评估，LLM 不负责重判。**
+- 在 Claw 产品对话里，LLM 只负责解释影响、可能后果、修复优先级和对普通用户的操作含义。
+- 不得重新计算、放大、减弱或“归一化” ClawLock 的结论、评分、等级、严重程度或发现列表。
+- 如果当前 CLI 输出里没有某个字段，就不要自行推断、补齐或伪造一个替代值。
+
+### 各功能的输入优先级
+
+- **Feature 1 全量扫描：** 优先使用 `clawlock scan --format json`
+  - 当前 JSON 稳定提供：`time`、`adapter`、`device`、`score`、`grade`、`domain_grades`、`domain_scores`、`findings`
+- **Feature 2 单体审计：** 优先使用默认 text 输出作为“最终结论”的来源
+  - 当前 `clawlock skill --format json` 只返回 findings 列表，不包含给用户看的结论语气
+- **Feature 3 precheck / Feature 5 drift / 其他聚焦命令：** 在没有结构化总结格式前，默认 text 输出就是规范结果
+- 如果 text 和 JSON 同时可用：结论以 text 为准，JSON 只用于补充结构化发现细节
+
+### Claw 产品面向用户的输出契约
+
+统一分成两段：
+
+```md
+# ClawLock 结果
+
+{只引用或转述 ClawLock 已经给出的事实}
+
+### 影响分析
+
+{LLM 面向普通用户解释：会发生什么、最该先处理什么、接下来怎么做}
+```
+
+规则如下：
+
+- `ClawLock 结果` 里只有在 CLI 明确给出时，才可以出现评分、等级、结论、发现计数
+- 对于全量扫描，可以展示 `domain_grades` 和 `domain_scores`，因为 `scan --format json` 里确实存在
+- 不得自行补出“每一步计数”“每个安全域的严重/高危/警告总数”“固定 Step 1-8 表格”等当前输出里不存在的字段
+- 不要把终端框线、进度条、颜色标记或大段原始 CLI 文本直接搬进对话
+- 不要把多个命令的输出再拼成一份新的“综合总报告”；每个命令各自保持原结论
+
+### 各功能的转述方式
+
+- **Feature 1 全量扫描：** 先引用 ClawLock 给出的 `score`、`grade`、可用的安全域评级与最高优先级发现，再补充影响分析
+- **Feature 2 / 3 / 5 单目标检查：** 先引用 ClawLock 的结论句，再用通俗语言解释影响
+- **如果命令明确说某项检查被跳过或暂不可用，必须保留原语义。** 不得把“skipped”说成“passed”，也不得把“发现风险”淡化成“仅需关注”
+
+### 允许与禁止
+
+| ✅ 允许 | ❌ 禁止 |
+|---------|---------|
+| 原样引用 ClawLock 已给出的结论 / 评分 / 等级 | 重新算出另一套评分、等级或总判断 |
+| 用通俗语言解释影响 | 添加 ClawLock 没报告的发现 |
+| 帮用户排优先级 | 删除发现，或弱化已报告的严重程度 |
+| 提醒静态分析局限、说明某项检查被跳过 | 编造表格、计数或步骤摘要 |
+
+---
+
+## 统一写作规则
+
+- **全部面向用户输出使用用户当前语言**（CVE ID、代码、命令除外）
+- 面向普通用户，少用专业词汇，用「会带来什么后果」「建议怎么做」的语气
+- 只使用 Markdown 标题、表格、引用和短段落；不使用 HTML 或复杂布局
+- 每个表格单元格尽量只写 1 句；最多「问题 + 建议」合并一句
+- 不在表格内换行成段
+- 不混用长句、项目符号清单和额外总结
+- 能用日常话说清楚的地方，不使用「暴露面」「攻防面」等抽象术语；改用「别人更容易从外网访问你的系统」这类描述
+- 不使用「绝对安全」「可放心使用」「已彻底解决」「没有任何风险」等绝对措辞
+- 单项审计（Feature 2）只输出简洁结论，**不展开成全量报告**
+
+---
+
+## 语言适配
+
+本 SKILL.md 为中文版本，配套英文版 [SKILL_EN.md](SKILL_EN.md)。输出语言跟随用户语言：用户用中文提问，输出中文；用户用英文提问，输出英文。CVE ID、命令、代码等专有名词保持原文。
+
+## 扫描启动提示
+
+在开始任何扫描（Feature 1–10）前，必须先输出一行启动提示：
+
+```
+🔍 ClawLock 正在检测 {目标} 安全性，请稍候...
+```
+
+将 `{目标}` 替换为实际内容（如 `Claw 环境`、`my-skill`、`当前工作区`）。
+
+---
+
+## 能力边界声明
+
+本 skill 执行**静态分析**，无法：
+- 检测纯运行时的恶意行为
+- 保证不存在未知漏洞
+- 执行真实攻击或确认漏洞可利用性
+- 读取系统隐私目录、会话记录、媒体文件
+
+v1.1 起，MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + AST 污点追踪），无需安装 ai-infra-guard 二进制。内建引擎基于已知模式匹配，对复杂的跨函数语义漏洞覆盖有限；如需 LLM 驱动的语义级分析，可通过 `--llm` 选项启用（需要 API key）。
+
+所有结论均为「当前检查范围内」的最佳评估。

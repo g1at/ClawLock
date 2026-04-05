@@ -248,11 +248,44 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         t("用户可控数据流入系统提示词。", "User-controllable data flows into system prompt."),
     ),
     AsiPattern(
+        "ASI-03",
+        HIGH,
+        re.compile(
+            r"(?:show|print|reveal|dump|output|display|输出|显示|打印|泄露|公开)[^\n]{0,80}"
+            r"(?:system prompt|developer message|internal rules?|hidden prompt|系统提示词|开发者消息|内部规则)",
+            re.I,
+        ),
+        t("请求提取系统提示词或内部规则", "Prompt asks to reveal system prompt or internal rules"),
+        t("代码或文档中包含提示词提取指令，可用于窃取隐藏系统规则。", "Code or docs contain prompt-extraction instructions that may disclose hidden system rules."),
+    ),
+    AsiPattern(
+        "ASI-03",
+        HIGH,
+        re.compile(
+            r"(?:system_prompt|system_message|prompt|instructions?)\s*[:=]\s*[^;\n]*"
+            r"(?:tool_output|stdout|response\.text|result(?:\.content)?)",
+            re.I,
+        ),
+        t("工具输出直接进入提示词", "Tool output flows directly into prompt text"),
+        t("未清洗的工具输出直接注入到 prompt/instructions，容易触发间接提示词攻击。", "Untrusted tool output is injected directly into prompt/instructions, enabling indirect prompt injection."),
+    ),
+    AsiPattern(
         "ASI-04",
         WARN,
         re.compile(r"(?:tools?\s*[:=]\s*\[)[^]]{2000,}", re.S),
         t("注册工具数量异常多", "Abnormally high number of registered tools"),
         t("单个 agent 注册了大量工具，增加误用风险。", "A single agent registers a large number of tools, increasing misuse risk."),
+    ),
+    AsiPattern(
+        "ASI-05",
+        HIGH,
+        re.compile(
+            r"(?:auto_approve|skip_approval|skip_confirmation|assume\s+(?:approval|permission)\s+granted|"
+            r"do\s+not\s+ask\s+for\s+(?:approval|confirmation)|不要请求确认|无需确认|默认已获批准)",
+            re.I,
+        ),
+        t("审批或确认流程被绕过", "Approval or confirmation flow is bypassed"),
+        t("代码或文档中包含跳过审批或确认的指令或开关。", "Code or docs contain instructions or toggles that bypass approval or confirmation."),
     ),
     AsiPattern(
         "ASI-06",
@@ -263,6 +296,16 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         ),
         t("外部内容直接写入 Agent 记忆", "External content written directly to agent memory"),
         t("不受信任的数据注入到 agent 持久化记忆中。", "Untrusted data injected into agent persistent memory."),
+    ),
+    AsiPattern(
+        "ASI-06",
+        HIGH,
+        re.compile(
+            r"(?:save|store|persist)\w*memory\s*\([^)]*(?:tool_output|stdout|response\.text|result(?:\.content)?)",
+            re.I,
+        ),
+        t("工具响应被持久化写入记忆", "Tool response persisted into memory"),
+        t("外部工具返回内容被直接保存到长期记忆，存在记忆投毒风险。", "External tool responses are written into long-term memory, creating memory-poisoning risk."),
     ),
     AsiPattern(
         "ASI-07",
@@ -284,6 +327,17 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         t("凭证从用户输入或未加保护的环境变量获取。", "Credentials obtained from user input or unprotected environment variables."),
     ),
     AsiPattern(
+        "ASI-08",
+        HIGH,
+        re.compile(
+            r"(?:logger\.(?:debug|info|warning|warn|error)|console\.log|print)\s*\([^)]*"
+            r"(?:api[_-]?key|token|secret|password|credential)",
+            re.I,
+        ),
+        t("敏感凭证被写入日志", "Sensitive credentials logged"),
+        t("代码将 token、password 或 secret 等敏感凭证写入日志或输出。", "Code writes token/password/secret-like credentials into logs or stdout."),
+    ),
+    AsiPattern(
         "ASI-10",
         WARN,
         re.compile(
@@ -292,6 +346,27 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         ),
         t("插件/技能声明了通配符权限", "Plugin/skill declares wildcard permissions"),
         t("使用 * 权限声明，违反最小权限原则。", "Uses * permission declaration, violating principle of least privilege."),
+    ),
+    AsiPattern(
+        "ASI-10",
+        HIGH,
+        re.compile(
+            r"(?:importlib\.import_module|__import__|require)\s*\([^)]*(?:tool_input|args|params|req|request|body|plugin|module)",
+            re.I,
+        ),
+        t("动态加载插件模块由外部输入控制", "Dynamic plugin/module loading controlled by external input"),
+        t("外部参数决定要加载的 module 或 plugin，容易引入非预期供应链或 RCE 风险。", "External parameters decide which module/plugin is loaded, creating supply-chain and RCE risk."),
+    ),
+    AsiPattern(
+        "ASI-12",
+        HIGH,
+        re.compile(
+            r"(?:logger\.(?:debug|info|warning|warn|error)|console\.log|print)\s*\([^)]*"
+            r"(?:system_prompt|prompt|conversation|chat_history|messages?)",
+            re.I,
+        ),
+        t("提示词或对话历史被写入日志", "Prompt or conversation history logged"),
+        t("system prompt、对话历史或 message 内容被输出到日志，容易泄露内部敏感信息。", "System prompts or conversation history are written to logs, risking sensitive prompt disclosure."),
     ),
     AsiPattern(
         "ASI-13",
@@ -304,6 +379,16 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         t("运行时通过 shell 安装包，存在供应链攻击风险。", "Packages installed via shell at runtime, posing supply chain attack risk."),
     ),
     AsiPattern(
+        "ASI-13",
+        HIGH,
+        re.compile(
+            r"(?:npx|uvx|pipx\s+run|npm\s+exec|pip\s+install\s+git\+https?://)",
+            re.I,
+        ),
+        t("运行时下载或执行远程依赖", "Runtime fetch or execution of remote dependencies"),
+        t("运行时使用 npx、uvx、pipx run、npm exec 或 git+ pip 依赖，会增加供应链风险。", "Using npx/uvx/pipx run/npm exec or git+ pip dependencies at runtime increases supply-chain risk."),
+    ),
+    AsiPattern(
         "ASI-14",
         HIGH,
         re.compile(
@@ -312,6 +397,17 @@ _ASI_CODE_PATTERNS: List[AsiPattern] = [
         ),
         t("存在跨 Agent 信任委托", "Cross-agent trust delegation exists"),
         t("Agent 将操作委托给其他 agent/server 时未验证信任关系。", "Agent delegates operations to other agents/servers without verifying trust relationship."),
+    ),
+    AsiPattern(
+        "ASI-14",
+        HIGH,
+        re.compile(
+            r"(?:forward|delegate|proxy|handoff|relay)\w*\s*\([^)]*(?:agent|peer|remote|server)[^)]*"
+            r"(?:tool_input|user_input|prompt|request|message)",
+            re.I,
+        ),
+        t("未验证的跨 Agent 指令转发", "Instruction forwarding across agents without trust checks"),
+        t("代码将用户指令、prompt 或请求直接转交其他 agent 或 server，但没有明确的信任验证逻辑。", "User instructions or prompts are forwarded to other agents/servers without explicit trust verification."),
     ),
 ]
 
@@ -380,19 +476,62 @@ _LLM_SYSTEM_PROMPT = """You are a security auditor. Analyze the following AI age
 For each finding, output one JSON object per line with fields: asi (e.g. ASI-01), severity (critical/high/medium/info), title, detail, remediation.
 Only output valid JSON lines. No markdown, no explanation."""
 
+_REDACTED = "[REDACTED]"
+_SECRET_KEY_RE = re.compile(
+    r"(?:token|secret|password|api[_-]?key|authorization|credential|cookie|private[_-]?key|session[_-]?key)",
+    re.I,
+)
+_SECRET_VALUE_RE = re.compile(
+    r"^(?:Bearer\s+.+|Basic\s+.+|sk-ant-[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+|"
+    r"github_pat_[A-Za-z0-9_]+|gh[opusr]_[A-Za-z0-9_]+|tp-[A-Za-z0-9._-]+)$",
+    re.I,
+)
+
+
+def _redact_for_llm(value: Any, key: str = "") -> Any:
+    """Remove secret-like values before sending code/config to third-party LLMs."""
+    if isinstance(value, dict):
+        return {k: _redact_for_llm(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_for_llm(v, key) for v in value]
+    if key and _SECRET_KEY_RE.search(key):
+        return _REDACTED if value not in (None, "") else value
+    if isinstance(value, str) and _SECRET_VALUE_RE.match(value.strip()):
+        return _REDACTED
+    return value
+
+
+def _resolve_llm_transport(
+    api_key: str,
+    base_url: str,
+) -> tuple[str, str, str]:
+    """Pick a provider/base URL pair without leaking payloads to the wrong vendor."""
+    explicit_base = bool(base_url)
+    if explicit_base:
+        provider = "anthropic" if "anthropic" in base_url.lower() else "openai"
+        if not api_key:
+            env_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+            api_key = os.environ.get(env_name, "")
+        return provider, base_url.rstrip("/"), api_key
+
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get(
+            "OPENAI_API_KEY", ""
+        )
+
+    if api_key.startswith("sk-ant-"):
+        return "anthropic", "https://api.anthropic.com", api_key
+    return "openai", "https://api.openai.com", api_key
+
 
 async def scan_agent_llm(
     code_or_config: str,
     model: str = "claude-sonnet-4-20250514",
     api_key: str = "",
-    base_url: str = "https://api.anthropic.com",
+    base_url: str = "",
 ) -> List[Finding]:
     """Layer 3: LLM-assisted semantic analysis. Requires API key."""
-    if not api_key:
-        api_key = os.environ.get(
-            "ANTHROPIC_API_KEY",
-            os.environ.get("OPENAI_API_KEY", ""),
-        )
+    provider, resolved_base_url, api_key = _resolve_llm_transport(api_key, base_url)
     if not api_key:
         return [
             Finding(
@@ -409,10 +548,10 @@ async def scan_agent_llm(
         truncated += "\n... [truncated]"
 
     try:
-        if "anthropic" in base_url.lower() or api_key.startswith("sk-ant-"):
+        if provider == "anthropic":
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
-                    f"{base_url.rstrip('/')}/v1/messages",
+                    f"{resolved_base_url}/v1/messages",
                     headers={
                         "x-api-key": api_key,
                         "anthropic-version": "2023-06-01",
@@ -438,7 +577,7 @@ async def scan_agent_llm(
         else:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
-                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    f"{resolved_base_url}/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "content-type": "application/json",
@@ -516,7 +655,7 @@ def scan_agent(
     code_path: Optional[Path] = None,
     llm_model: str = "",
     llm_token: str = "",
-    llm_base_url: str = "https://api.anthropic.com",
+    llm_base_url: str = "",
     enable_llm: bool = False,
 ) -> List[Finding]:
     """
@@ -559,7 +698,11 @@ def scan_agent(
                         + file_path.read_text(errors="ignore")[:2000]
                     )
         elif config:
-            code_text = json.dumps(config, indent=2, ensure_ascii=False)
+            code_text = json.dumps(
+                _redact_for_llm(config),
+                indent=2,
+                ensure_ascii=False,
+            )
 
         if code_text:
             findings.extend(

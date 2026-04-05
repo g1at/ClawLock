@@ -232,27 +232,6 @@ def find_all_binaries(names: List[str]) -> Dict[str, Optional[str]]:
 # ─── Android / Termux specifics ─────────────────────────────────────────────
 
 
-def android_home() -> Path:
-    """On Android/Termux, home is /data/data/com.termux/files/home."""
-    if IS_ANDROID:
-        termux_home = Path("/data/data/com.termux/files/home")
-        if termux_home.exists():
-            return termux_home
-    return Path.home()
-
-
-def android_extra_config_paths() -> List[str]:
-    """Additional config search paths for Android/Termux."""
-    if not IS_ANDROID:
-        return []
-    home = android_home()
-    return [
-        str(home / ".openclaw" / "openclaw.json"),
-        str(home / ".zeroclaw" / "config.json"),
-        str(home / ".claude" / "settings.json"),
-    ]
-
-
 # ─── Device fingerprint (privacy-preserving) ────────────────────────────────
 
 
@@ -272,26 +251,52 @@ def device_fingerprint() -> str:
 # ─── Scan history persistence ────────────────────────────────────────────────
 
 HISTORY_FILE = Path.home() / ".clawlock" / "scan_history.json"
+_HISTORY_CACHE: list | None = None
+_HISTORY_CACHE_PATH: Path | None = None
+
+
+def _history_cache_matches() -> bool:
+    return _HISTORY_CACHE_PATH == HISTORY_FILE
 
 
 def _load_history() -> list:
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if HISTORY_FILE.exists():
-        try:
+    global _HISTORY_CACHE, _HISTORY_CACHE_PATH
+
+    if _HISTORY_CACHE is not None and _history_cache_matches():
+        return list(_HISTORY_CACHE)
+
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if HISTORY_FILE.exists():
             import json
 
-            return json.loads(HISTORY_FILE.read_text())
-        except Exception:
-            pass
+            _HISTORY_CACHE = json.loads(HISTORY_FILE.read_text())
+            _HISTORY_CACHE_PATH = HISTORY_FILE
+            return list(_HISTORY_CACHE)
+    except Exception:
+        pass
+
+    _HISTORY_CACHE = []
+    _HISTORY_CACHE_PATH = HISTORY_FILE
     return []
 
 
 def _save_history(records: list):
+    global _HISTORY_CACHE, _HISTORY_CACHE_PATH
     import json
 
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Keep last 100 records
-    HISTORY_FILE.write_text(json.dumps(records[-100:], ensure_ascii=False, indent=2))
+    cached = list(records[-100:])
+    _HISTORY_CACHE = cached
+    _HISTORY_CACHE_PATH = HISTORY_FILE
+
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HISTORY_FILE.write_text(json.dumps(cached, ensure_ascii=False, indent=2))
+    except Exception:
+        # Persistence is best-effort; scans should still succeed when the
+        # runtime cannot write to the user's home directory.
+        return False
+    return True
 
 
 def record_scan(
