@@ -1,4 +1,4 @@
-"""ClawLock v2.2.0 CLI - 12 commands."""
+"""ClawLock v2.2.1 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -169,8 +169,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.2.0 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.2.0 - security scan and hardening for Claw platforms",
+        "ClawLock v2.2.1 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.2.1 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -301,7 +301,6 @@ def scan(
     from .adapters import load_config
 
     agent_config, _ = load_config(spec)
-    agent_code_path = Path.cwd()
     if rich_text:
         console.print(
             f"  [dim]{t('适配器', 'Adapter')}: [bold]{spec.display}[/bold]  "
@@ -335,7 +334,6 @@ def scan(
 
         return run_agent_scan(
             config=agent_config or None,
-            code_path=agent_code_path,
             enable_llm=False,
         )
 

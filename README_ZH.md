@@ -120,7 +120,7 @@ clawlock scan --format html -o report.html
 | 5 | Prompt 与记忆 | 检查 SOUL / prompt 漂移与 memory 文件 |
 | 6 | MCP 暴露面 | 检查 MCP 配置与 poisoning 面 |
 | 7 | CVE 匹配 | 默认启用腾讯在线 CVE 情报查询，可用 `--no-cve` 关闭 |
-| 8 | Agent 安全 | `scan` 默认纳入适配器配置层与当前工作区代码层的 ASI 检查 |
+| 8 | Agent 安全 | `scan` 默认纳入适配器配置层 ASI 检查；代码层请额外使用 `agent-scan` |
 | 9 | 红队测试（可选） | 仅在传入 `--endpoint` 且未设置 `--no-redteam` 时运行 |
 
 ## 依赖模型
@@ -141,7 +141,7 @@ pip install clawlock
 - 加固
 - 历史记录与 watch 模式
 - MCP 深度扫描
-- `scan` 默认纳入 Agent 配置层与当前工作区代码层
+- `scan` 默认纳入 Agent 配置层；代码层请使用 `agent-scan --code ...`
 
 ### 2. 无 API key 的在线情报
 

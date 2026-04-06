@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.2.0"
+    version: "2.2.1"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -153,8 +153,8 @@ clawlock version --check-update --json --skill-path /path/to/SKILL.md
 
 ## Feature 1: 全量安全扫描
 
-并发执行 8 个核心安全域扫描；默认 `scan` 已纳入 Agent 安全的配置层检查，
-并会将当前工作区代码层并入同一安全域评分。如果提供了 `--endpoint` 且没有传
+并发执行 8 个核心安全域扫描；默认 `scan` 已纳入 Agent 安全的配置层检查。
+如需代码层 Agent 审计，额外运行 `clawlock agent-scan --code <path>`。如果提供了 `--endpoint` 且没有传
 `--no-redteam`，ClawLock 会在核心扫描完成后追加可选的第 9 步红队测试，
 最后输出一份统一报告。
 

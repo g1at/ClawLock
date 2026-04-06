@@ -20,7 +20,7 @@ class TestCliEntry:
         assert result.exit_code == 0
         assert "Agent Security Enforcement" in result.stdout
         assert "██████╗██╗" in result.stdout
-        assert "v2.2.0" in result.stdout
+        assert "v2.2.1" in result.stdout
         assert "g0at" in result.stdout
 
     def test_root_help_still_shows_help(self):
@@ -39,7 +39,7 @@ class TestCliEntry:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.2.0"
+    version: "2.2.1"
     homepage: "https://github.com/g1at/ClawLock"
 ---
 """,
@@ -50,7 +50,7 @@ metadata:
 
         def _fake_http_get_json(url, timeout=5.0):
             if "pypi.org" in url:
-                return {"info": {"version": "2.2.1"}}
+                return {"info": {"version": "2.2.2"}}
             raise AssertionError(url)
 
         def _fake_http_get_text(url, timeout=5.0):
@@ -62,7 +62,7 @@ metadata:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.2.1"
+    version: "2.2.2"
 ---
 """
 
@@ -81,12 +81,12 @@ metadata:
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["package"]["latest_version"] == "2.2.1"
+        assert payload["package"]["latest_version"] == "2.2.2"
         assert payload["package"]["update_available"] is True
-        assert payload["skill"]["local_version"] == "2.2.0"
-        assert payload["skill"]["latest_version"] == "2.2.1"
+        assert payload["skill"]["local_version"] == "2.2.1"
+        assert payload["skill"]["latest_version"] == "2.2.2"
         assert payload["skill"]["remote_url"] == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
-        assert payload["skill"]["installed_package_version"] == "2.2.0"
+        assert payload["skill"]["installed_package_version"] == "2.2.1"
         assert payload["skill"]["matches_installed_package"] is True
         assert "pip install -U clawlock" in payload["suggested_updates"]
         assert (
@@ -663,7 +663,7 @@ class TestCveLookup:
         cli.scan(adapter="generic", no_cve=False, no_redteam=True, output_format="json")
         assert calls == [("ZeroClaw", "2.4.6")]
 
-    def test_scan_runs_agent_security_config_and_code_by_default(self, monkeypatch):
+    def test_scan_runs_agent_security_config_by_default(self, monkeypatch):
         import clawlock.__main__ as cli
         import clawlock.adapters as adapters
         import clawlock.integrations as integrations
@@ -687,7 +687,7 @@ class TestCveLookup:
 
         assert len(calls) == 1
         assert calls[0]["config"] == {"gateway": {"auth": {"token": "x"}}}
-        assert calls[0]["code_path"] == Path.cwd()
+        assert "code_path" not in calls[0]
         assert calls[0]["enable_llm"] is False
 
     def test_scan_runs_agent_security_even_without_adapter_config(self, monkeypatch):
@@ -710,7 +710,7 @@ class TestCveLookup:
 
         assert len(calls) == 1
         assert calls[0]["config"] is None
-        assert calls[0]["code_path"] == Path.cwd()
+        assert "code_path" not in calls[0]
         assert "Agent Security" in captured["findings_map"] or "Agent 安全" in captured["findings_map"]
 
 
