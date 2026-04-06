@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.2.0"
+    version: "2.2.1"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -156,8 +156,8 @@ In Claw product conversations, gracefully degrade and explain the reason in all 
 ## Feature 1: Full Security Scan
 
 Runs 8 core security domains concurrently. Agent Security is included in the
-default `scan` with adapter config checks plus current-workspace code-layer
-scoring under the same domain. If `--endpoint` is provided and
+default `scan` with adapter config checks. For code-layer Agent review, run
+`clawlock agent-scan --code <path>` separately. If `--endpoint` is provided and
 `--no-redteam` is not set, ClawLock appends an optional Step 9 red-team stage
 after the core scan, then outputs one unified report.
 

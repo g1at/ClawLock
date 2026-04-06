@@ -120,7 +120,7 @@ clawlock scan --format html -o report.html
 | 5 | Prompt and memory | SOUL / prompt drift plus memory-file checks |
 | 6 | MCP exposure | MCP config and poisoning-surface checks |
 | 7 | CVE matching | Tencent cloud CVE intelligence lookup, enabled by default unless `--no-cve` |
-| 8 | Agent security | Included in `scan` with adapter config plus current-workspace code-layer ASI checks |
+| 8 | Agent security | Included in `scan` with adapter config ASI checks; use `agent-scan` for code-layer review |
 | 9 | Red Team (optional) | Runs only when `--endpoint` is provided and `--no-redteam` is not used |
 
 ## Dependency Model
@@ -141,7 +141,7 @@ No Node.js, no external scanner binary, and no LLM API key are required for:
 - hardening
 - history and watch mode
 - MCP deep scan
-- Agent-Scan config + current-workspace code layers are included in `scan`
+- `scan` includes the Agent-Scan config layer; use `agent-scan --code ...` for code-layer review
 
 ### 2. Online intelligence without API keys
 
