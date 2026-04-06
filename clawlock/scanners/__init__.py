@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.1.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.1.1 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
