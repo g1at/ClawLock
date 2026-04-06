@@ -20,6 +20,8 @@ class TestCliEntry:
         assert result.exit_code == 0
         assert "Agent Security Enforcement" in result.stdout
         assert "██████╗██╗" in result.stdout
+        assert "v2.1.0" in result.stdout
+        assert "g0at" in result.stdout
 
     def test_root_help_still_shows_help(self):
         from clawlock.__main__ import app
@@ -27,6 +29,70 @@ class TestCliEntry:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert ("Usage:" in result.stdout) or ("用法：" in result.stdout)
+
+    def test_version_check_update_json(self, monkeypatch, tmp_path):
+        from clawlock.__main__ import app
+
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text(
+            """---
+name: clawlock
+metadata:
+  clawlock:
+    version: "2.1.0"
+    homepage: "https://github.com/g1at/ClawLock"
+---
+""",
+            encoding="utf-8",
+        )
+
+        import clawlock.updates as updates
+
+        def _fake_http_get_json(url, timeout=5.0):
+            if "pypi.org" in url:
+                return {"info": {"version": "2.1.1"}}
+            raise AssertionError(url)
+
+        def _fake_http_get_text(url, timeout=5.0):
+            assert (
+                url
+                == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
+            )
+            return """---
+name: clawlock
+metadata:
+  clawlock:
+    version: "2.1.1"
+---
+"""
+
+        monkeypatch.setattr(updates, "_http_get_json", _fake_http_get_json)
+        monkeypatch.setattr(updates, "_http_get_text", _fake_http_get_text)
+
+        result = runner.invoke(
+            app,
+            [
+                "version",
+                "--check-update",
+                "--json",
+                "--skill-path",
+                str(skill_path),
+            ],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["package"]["latest_version"] == "2.1.1"
+        assert payload["package"]["update_available"] is True
+        assert payload["skill"]["local_version"] == "2.1.0"
+        assert payload["skill"]["latest_version"] == "2.1.1"
+        assert payload["skill"]["remote_url"] == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
+        assert payload["skill"]["installed_package_version"] == "2.1.0"
+        assert payload["skill"]["matches_installed_package"] is True
+        assert "pip install -U clawlock" in payload["suggested_updates"]
+        assert (
+            "download the latest skill file from https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
+            in payload["suggested_updates"]
+        )
 
     def test_scan_help_describes_formats_and_modes(self):
         from clawlock.__main__ import app

@@ -1,4 +1,4 @@
-"""ClawLock v2.0.0 CLI - 12 commands."""
+"""ClawLock v2.1.0 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from rich.align import Align
 from rich.text import Text
 from rich.progress import (
     BarColumn,
@@ -167,20 +168,20 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.0.0 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.0.0 - security scan and hardening for Claw platforms",
+        "ClawLock v2.1.0 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.1.0 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
 )
-LOGO = """  ██████╗██╗      █████╗ ██╗    ██╗██╗      ██████╗  ██████╗██╗  ██╗
-  ██╔════╝██║     ██╔══██╗██║    ██║██║     ██╔═══██╗██╔════╝██║ ██╔╝
-  ██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║     █████╔╝
-  ██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║     ██╔═██╗
-  ╚██████╗███████╗██║  ██║╚███╔███╔╝███████╗╚██████╔╝╚██████╗██║  ██╗
-   ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝
-
-        >> Agent Security Enforcement <<"""
+LOGO = """██████╗██╗      █████╗ ██╗    ██╗██╗      ██████╗  ██████╗██╗  ██╗
+██╔════╝██║     ██╔══██╗██║    ██║██║     ██╔═══██╗██╔════╝██║ ██╔╝
+██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║     █████╔╝
+██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║     ██╔═██╗
+╚██████╗███████╗██║  ██║╚███╔███╔╝███████╗╚██████╔╝╚██████╗██║  ██╗
+ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝"""
+TAGLINE = ">> Agent Security Enforcement <<"
+AUTHOR_ID = "g0at"
 A = Annotated[
     str,
     typer.Option(
@@ -219,7 +220,10 @@ def _tag(level: str) -> str:
 def main(ctx: typer.Context):
     """Render the brand logo when invoked without a subcommand."""
     if ctx.invoked_subcommand is None:
-        console.print(Text(LOGO, style="bold cyan"))
+        console.print(Align.center(Text(LOGO, style="bold cyan")))
+        console.print()
+        console.print(Align.center(Text(TAGLINE, style="bold cyan")))
+        console.print(Align.center(Text(f"v{__version__} | by {AUTHOR_ID}", style="dim")))
 
 
 @app.command(help=t("执行全量安全扫描", "Run the full security scan."))
@@ -804,10 +808,51 @@ def watch(
 
 
 @app.command(help=t("显示版本信息", "Show version info."))
-def version():
+def version(
+    check_update: Annotated[
+        bool,
+        typer.Option(
+            "--check-update",
+            help=t(
+                "检查 PyPI 更新与本地 skill 版本同步状态",
+                "Check PyPI updates and local skill version sync",
+            ),
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=t("以 JSON 输出版本与更新信息", "Output version and update info as JSON"),
+        ),
+    ] = False,
+    skill_path: Annotated[
+        Optional[str],
+        typer.Option(
+            "--skill-path",
+            help=t(
+                "本地 SKILL.md 路径，用于检查 skill 版本同步状态",
+                "Local SKILL.md path for skill version sync checks",
+            ),
+        ),
+    ] = None,
+):
     """Show version info."""
     from .integrations import _ext_version
+    from .updates import build_update_report, render_update_report_json, render_update_report_text
     from .utils import platform_label
+
+    resolved_skill_path = Path(skill_path) if skill_path else None
+    if resolved_skill_path is not None and not resolved_skill_path.exists():
+        raise typer.BadParameter(t("SKILL.md 路径不存在", "SKILL.md path does not exist"))
+
+    if check_update:
+        report = build_update_report(resolved_skill_path)
+        if json_output:
+            typer.echo(render_update_report_json(report))
+        else:
+            console.print(render_update_report_text(report))
+        return
 
     console.print(f"ClawLock v[bold]{__version__}[/bold]")
     console.print("[dim]https://github.com/g1at/clawlock[/dim]")

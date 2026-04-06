@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawlock"
-version = "2.0.0"
+version = "2.1.0"
 description = "Comprehensive security scanner, red-teamer & hardening toolkit for Claw-based AI agent deployments"
 readme = "README.md"
 license = {text = "Apache-2.0 OR MIT"}
 requires-python = ">=3.9"
-authors = [{name = "g1at"}]
+authors = [{name = "g0at"}]
 keywords = ["security", "ai-agent", "openclaw", "zeroclaw", "claude-code", "mcp", "red-team", "hardening", "llm-security", "prompt-injection", "supply-chain", "tool-poisoning"]
 classifiers = [
     "Development Status :: 4 - Beta",
