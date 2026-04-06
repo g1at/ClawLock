@@ -1,4 +1,4 @@
-"""ClawLock v2.1.0 CLI - 12 commands."""
+"""ClawLock v2.1.1 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 from rich.align import Align
+from rich.cells import cell_len
 from rich.text import Text
 from rich.progress import (
     BarColumn,
@@ -168,20 +169,39 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.1.0 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.1.0 - security scan and hardening for Claw platforms",
+        "ClawLock v2.1.1 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.1.1 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
 )
-LOGO = """██████╗██╗      █████╗ ██╗    ██╗██╗      ██████╗  ██████╗██╗  ██╗
-██╔════╝██║     ██╔══██╗██║    ██║██║     ██╔═══██╗██╔════╝██║ ██╔╝
-██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║     █████╔╝
-██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║     ██╔═██╗
-╚██████╗███████╗██║  ██║╚███╔███╔╝███████╗╚██████╔╝╚██████╗██║  ██╗
- ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝"""
+LOGO = """   ██████╗██╗      █████╗ ██╗    ██╗██╗      ██████╗  ██████╗██╗  ██╗
+  ██╔════╝██║     ██╔══██╗██║    ██║██║     ██╔═══██╗██╔════╝██║ ██╔╝
+  ██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║     █████╔╝ 
+  ██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║     ██╔═██╗ 
+  ╚██████╗███████╗██║  ██║╚███╔███╔╝███████╗╚██████╔╝╚██████╗██║  ██╗
+   ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝"""
 TAGLINE = ">> Agent Security Enforcement <<"
 AUTHOR_ID = "g0at"
+
+
+def _pad_center(line: str, width: int) -> str:
+    diff = max(0, width - cell_len(line))
+    left = diff // 2
+    right = diff - left
+    return (" " * left) + line + (" " * right)
+
+
+def _footer_block_text() -> Text:
+    version_line = f"v{__version__} | by {AUTHOR_ID}"
+    width = max(cell_len(TAGLINE), cell_len(version_line))
+    text = Text()
+    text.append(_pad_center(TAGLINE, width), style="bold cyan")
+    text.append("\n")
+    text.append(_pad_center(version_line, width), style="dim")
+    return text
+
+
 A = Annotated[
     str,
     typer.Option(
@@ -222,8 +242,7 @@ def main(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
         console.print(Align.center(Text(LOGO, style="bold cyan")))
         console.print()
-        console.print(Align.center(Text(TAGLINE, style="bold cyan")))
-        console.print(Align.center(Text(f"v{__version__} | by {AUTHOR_ID}", style="dim")))
+        console.print(Align.center(_footer_block_text()))
 
 
 @app.command(help=t("执行全量安全扫描", "Run the full security scan."))

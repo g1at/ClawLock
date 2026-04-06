@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawlock"
-version = "2.1.0"
+version = "2.1.1"
 description = "Comprehensive security scanner, red-teamer & hardening toolkit for Claw-based AI agent deployments"
 readme = "README.md"
 license = {text = "Apache-2.0 OR MIT"}
