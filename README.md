@@ -52,6 +52,29 @@ ClawLock uses one simple global rule:
 - `CLAWLOCK_LANG=zh`: Chinese
 - Any other value, or not set: English
 
+Examples by platform:
+
+Windows PowerShell:
+
+```powershell
+$env:CLAWLOCK_LANG='zh'
+clawlock scan
+```
+
+Windows CMD:
+
+```bat
+set CLAWLOCK_LANG=zh
+clawlock scan
+```
+
+Linux / macOS / Android (Termux):
+
+```bash
+export CLAWLOCK_LANG=zh
+clawlock scan
+```
+
 This applies to:
 
 - `--help`

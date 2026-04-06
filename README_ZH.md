@@ -52,6 +52,29 @@ ClawLock 当前采用一条统一规则：
 - `CLAWLOCK_LANG=zh`：输出中文
 - 其他任意值，或未设置：输出英文
 
+不同平台示例：
+
+Windows PowerShell：
+
+```powershell
+$env:CLAWLOCK_LANG='zh'
+clawlock scan
+```
+
+Windows CMD：
+
+```bat
+set CLAWLOCK_LANG=zh
+clawlock scan
+```
+
+Linux / macOS / Android (Termux)：
+
+```bash
+export CLAWLOCK_LANG=zh
+clawlock scan
+```
+
 这条规则会影响：
 
 - `--help`
