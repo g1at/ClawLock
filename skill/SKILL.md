@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.1.1"
+    version: "2.2.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -153,8 +153,9 @@ clawlock version --check-update --json --skill-path /path/to/SKILL.md
 
 ## Feature 1: 全量安全扫描
 
-并发执行 7 个核心安全域扫描；如果提供了 `--endpoint` 且没有传
-`--no-redteam`，ClawLock 会在核心扫描完成后追加可选的第 8 步红队测试，
+并发执行 8 个核心安全域扫描；默认 `scan` 已纳入 Agent 安全的配置层检查，
+并会将当前工作区代码层并入同一安全域评分。如果提供了 `--endpoint` 且没有传
+`--no-redteam`，ClawLock 会在核心扫描完成后追加可选的第 9 步红队测试，
 最后输出一份统一报告。
 
 ```bash
@@ -268,7 +269,7 @@ clawlock scan --no-cve                           # 离线模式
 
 9 个 agent 专项插件 × 8 种攻击策略（含编码绕过）。
 
-> ⚠️ **外部依赖：** 此功能需要 Node.js 环境，并通过 `promptfoo` 或 `npx` 运行（例如 `npm install -g promptfoo`，或直接使用 `npx promptfoo@latest`）。如果当前环境无法安装，请跳过此步骤，不影响其余 7 个核心扫描步骤的完整性。Skill 环境中通常无 Node.js，此步会自动跳过并提示原因。
+> ⚠️ **外部依赖：** 此功能需要 Node.js 环境，并通过 `promptfoo` 或 `npx` 运行（例如 `npm install -g promptfoo`，或直接使用 `npx promptfoo@latest`）。如果当前环境无法安装，请跳过此步骤，不影响其余 8 个核心安全域的完整性。Skill 环境中通常无 Node.js，此步会自动跳过并提示原因。
 
 ---
 

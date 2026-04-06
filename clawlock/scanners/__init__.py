@@ -1,5 +1,5 @@
-﻿"""
-ClawLock v2.1.1 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+"""
+ClawLock v2.2.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -227,34 +227,81 @@ def _check_risky_env(config: dict, cfg_path: str) -> List[Finding]:
     return findings
 
 
+_AUDIT_LEVEL_KEYWORDS = {
+    "CRITICAL": CRIT,
+    "HIGH": HIGH,
+    "WARN": WARN,
+    "ERROR": HIGH,
+}
+
+
+def _parse_native_audit_findings(output: str, location: str) -> List[Finding]:
+    findings: List[Finding] = []
+    pending_level: Optional[str] = None
+    last_finding: Optional[Finding] = None
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            pending_level = None
+            last_finding = None
+            continue
+
+        upper = line.upper()
+        if upper in _AUDIT_LEVEL_KEYWORDS:
+            pending_level = _AUDIT_LEVEL_KEYWORDS[upper]
+            last_finding = None
+            continue
+
+        if re.match(
+            r"(?i)^found\s+\d+\s+(?:critical|high|warn|warning|info)\s+issue\(s\)\s+in\s+\d+\s+scanned\s+file\(s\)",
+            line,
+        ) or line.startswith(("Summary:", "Summary：")):
+            pending_level = None
+            last_finding = None
+            continue
+
+        if line.startswith(("Location:", "Location：")):
+            if last_finding and (
+                not last_finding.location or last_finding.location == location
+            ):
+                last_finding.location = line.split(":", 1)[-1].strip() or location
+            continue
+
+        if line.startswith(("Fix:", "Fix：")):
+            if last_finding and not last_finding.remediation:
+                last_finding.remediation = line.split(":", 1)[-1].strip()
+            continue
+
+        sev = pending_level
+        if sev is None:
+            for kw, lv in _AUDIT_LEVEL_KEYWORDS.items():
+                if kw in upper:
+                    sev = lv
+                    break
+
+        if sev is None and not any(
+            (w in line.lower() for w in ("risk", "vuln", "exposed"))
+        ):
+            continue
+
+        finding = Finding("config", sev or INFO, line[:120], line, location)
+        findings.append(finding)
+        last_finding = finding
+        pending_level = None
+
+    return findings
+
+
 def scan_config(adapter: AdapterSpec) -> Tuple[List[Finding], Optional[str]]:
     findings: List[Finding] = []
     config, cfg_path = load_config(adapter)
     if adapter.audit_cmd:
         code, out, err = run_cmd(adapter.audit_cmd)
         if code == 0 and out:
-            for line in out.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                sev = INFO
-                for kw, lv in [
-                    ("CRITICAL", CRIT),
-                    ("HIGH", HIGH),
-                    ("WARN", WARN),
-                    ("ERROR", HIGH),
-                ]:
-                    if kw in line.upper():
-                        sev = lv
-                        break
-                if sev != INFO or any(
-                    (w in line.lower() for w in ("risk", "vuln", "exposed"))
-                ):
-                    findings.append(
-                        Finding(
-                            "config", sev, line[:120], line, cfg_path or "builtin-audit"
-                        )
-                    )
+            findings.extend(
+                _parse_native_audit_findings(out, cfg_path or "builtin-audit")
+            )
     for key, test_fn, level, title, detail, remediation in _CONFIG_RULES.get(
         adapter.name, []
     ) + _CONFIG_RULES.get("_common", []):
@@ -1388,4 +1435,3 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         )
     is_safe = not any((f.level in (CRIT, HIGH) for f in findings))
     return (findings, is_safe)
-

@@ -1,4 +1,4 @@
-"""ClawLock v2.1.1 CLI - 12 commands."""
+"""ClawLock v2.2.0 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -169,8 +169,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.1.1 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.1.1 - security scan and hardening for Claw platforms",
+        "ClawLock v2.2.0 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.2.0 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -298,6 +298,10 @@ def scan(
         console.print(BANNER.format(ver=__version__))
     spec = get_adapter(adapter)
     ver = get_claw_version(spec)
+    from .adapters import load_config
+
+    agent_config, _ = load_config(spec)
+    agent_code_path = Path.cwd()
     if rich_text:
         console.print(
             f"  [dim]{t('适配器', 'Adapter')}: [bold]{spec.display}[/bold]  "
@@ -326,6 +330,15 @@ def scan(
             return asyncio.run(lookup_cve(cve_target.product, cve_target.version))
         return [Finding("cve", INFO, t("已跳过在线 CVE 匹配", "Skipped online CVE matching"), skip_reason)]
 
+    def _scan_agent_security():
+        from .integrations import run_agent_scan
+
+        return run_agent_scan(
+            config=agent_config or None,
+            code_path=agent_code_path,
+            enable_llm=False,
+        )
+
     # Step labels for progress display, mapped to their scan functions
     tasks = [
         (t("配置审计", "Config"), _scan_config),
@@ -335,6 +348,7 @@ def scan(
         (t("提示词与记忆", "Prompt & Memory"), _scan_soul_mem),
         (t("MCP", "MCP"), lambda: scan_mcp(spec, extra_mcp=mcp_config)),
         (t("CVE", "CVEs"), _scan_cve),
+        (t("Agent 安全", "Agent Security"), _scan_agent_security),
     ]
 
     if rich_text:
@@ -389,7 +403,7 @@ def scan(
         ordered_map[label] = findings_map.get(label, [])
     findings_map = ordered_map
 
-    # Step 8: Red team (conditional, sequential)
+    # Optional red-team stage after the core scan domains
     redteam_f = []
     if not no_redteam and endpoint:
         if rich_text:

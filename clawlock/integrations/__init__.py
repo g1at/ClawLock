@@ -1,5 +1,5 @@
-﻿"""
-ClawLock v2.1.1 integrations — cloud intelligence,
+"""
+ClawLock v2.2.0 integrations — cloud intelligence,
 external scanner, and Agent-Scan.
 """
 
@@ -270,4 +270,3 @@ def _run_ext_mcp(
             ]
         except Exception:
             return []
-
