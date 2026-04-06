@@ -16,7 +16,7 @@
 ## 核心特性
 
 - **12 个 CLI 命令**，覆盖全量扫描、单 skill 审计、加固、历史、监控、MCP 扫描和 Agent-Scan
-- **`clawlock scan` 的 7 个核心阶段并发执行**，外加一个可选红队阶段
+- **`clawlock scan` 的 8 个核心安全域并发执行**，外加一个可选红队阶段
 - **内建 MCP 深度扫描引擎**，基于正则和 AST，覆盖 14 个风险类别
 - **内建 OWASP ASI 14 Agent-Scan**，支持配置检查、代码扫描和可选 LLM 语义分析
 - **18 项交互式加固措施**，支持按平台过滤，并明确标注 UX 影响
@@ -39,7 +39,7 @@ clawlock soul                            # 检查 prompt / memory 漂移
 clawlock harden                          # 交互式加固向导
 clawlock harden --auto-fix               # 自动应用安全本地修复
 clawlock mcp-scan ./mcp-server/src       # MCP 源码深度扫描
-clawlock agent-scan --code ./agent/src   # OWASP ASI Agent 扫描
+clawlock agent-scan --code ./agent/src   # 独立执行 OWASP ASI Agent 扫描
 clawlock scan --format html -o report.html
 ```
 
@@ -109,7 +109,7 @@ clawlock scan --format html -o report.html
 
 ## 扫描管线
 
-`clawlock scan` 会并发执行 7 个核心阶段，然后按条件追加一个红队阶段。
+`clawlock scan` 会并发执行 8 个核心安全域，然后按条件追加一个红队阶段。
 
 | 步骤 | 检查项 | 说明 |
 |------|--------|------|
@@ -120,7 +120,8 @@ clawlock scan --format html -o report.html
 | 5 | Prompt 与记忆 | 检查 SOUL / prompt 漂移与 memory 文件 |
 | 6 | MCP 暴露面 | 检查 MCP 配置与 poisoning 面 |
 | 7 | CVE 匹配 | 默认启用腾讯在线 CVE 情报查询，可用 `--no-cve` 关闭 |
-| 8 | 红队测试（可选） | 仅在传入 `--endpoint` 且未设置 `--no-redteam` 时运行 |
+| 8 | Agent 安全 | `scan` 默认纳入适配器配置层与当前工作区代码层的 ASI 检查 |
+| 9 | 红队测试（可选） | 仅在传入 `--endpoint` 且未设置 `--no-redteam` 时运行 |
 
 ## 依赖模型
 
@@ -140,7 +141,7 @@ pip install clawlock
 - 加固
 - 历史记录与 watch 模式
 - MCP 深度扫描
-- Agent-Scan 的配置层与代码层
+- `scan` 默认纳入 Agent 配置层与当前工作区代码层
 
 ### 2. 无 API key 的在线情报
 

@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.1.1"
+    version: "2.2.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -155,8 +155,10 @@ In Claw product conversations, gracefully degrade and explain the reason in all 
 
 ## Feature 1: Full Security Scan
 
-Runs 7 core security domains concurrently. If `--endpoint` is provided and
-`--no-redteam` is not set, ClawLock appends an optional Step 8 red-team stage
+Runs 8 core security domains concurrently. Agent Security is included in the
+default `scan` with adapter config checks plus current-workspace code-layer
+scoring under the same domain. If `--endpoint` is provided and
+`--no-redteam` is not set, ClawLock appends an optional Step 9 red-team stage
 after the core scan, then outputs one unified report.
 
 ```bash
@@ -270,7 +272,7 @@ Queries ClawLock cloud vulnerability intelligence.
 
 9 agent-specific plugins × 8 attack strategies (including encoding bypass).
 
-> ⚠️ **External dependency:** This feature requires Node.js and runs through `promptfoo` or `npx` (for example `npm install -g promptfoo`, or `npx promptfoo@latest`). If the current environment cannot install it, skip this step — the remaining 7 core scan steps remain fully functional. In Skill environments where Node.js is typically unavailable, this step auto-skips with an explanation.
+> ⚠️ **External dependency:** This feature requires Node.js and runs through `promptfoo` or `npx` (for example `npm install -g promptfoo`, or `npx promptfoo@latest`). If the current environment cannot install it, skip this step — the remaining 8 core security domains remain fully functional. In Skill environments where Node.js is typically unavailable, this step auto-skips with an explanation.
 
 ---
 

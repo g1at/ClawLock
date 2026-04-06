@@ -16,7 +16,7 @@ It is designed for both professional security users and everyday operators:
 ## Highlights
 
 - **12 CLI commands** covering full scan, single-skill audit, hardening, history, watch mode, MCP scan, and Agent-Scan
-- **7 concurrent core scan stages** in `clawlock scan`, plus an optional red-team stage
+- **8 concurrent core security domains** in `clawlock scan`, plus an optional red-team stage
 - **Built-in MCP deep scan engine** with regex + AST analysis across 14 risk categories
 - **Built-in OWASP ASI 14 Agent-Scan** with config analysis, code scanning, and optional LLM assessment
 - **Interactive hardening** with 18 measures, platform-aware filtering, and explicit UX-impact disclosure
@@ -39,7 +39,7 @@ clawlock soul                            # Check prompt + memory drift
 clawlock harden                          # Interactive hardening wizard
 clawlock harden --auto-fix               # Apply safe local auto-fixes
 clawlock mcp-scan ./mcp-server/src       # MCP source-code deep scan
-clawlock agent-scan --code ./agent/src   # OWASP ASI agent scan
+clawlock agent-scan --code ./agent/src   # Standalone OWASP ASI agent scan
 clawlock scan --format html -o report.html
 ```
 
@@ -109,7 +109,7 @@ clawlock scan --format html -o report.html
 
 ## Scan Pipeline
 
-`clawlock scan` runs 7 core stages in parallel, then optionally runs a red-team stage.
+`clawlock scan` runs 8 core security domains in parallel, then optionally runs a red-team stage.
 
 | Step | Check | What it does |
 |------|-------|--------------|
@@ -120,7 +120,8 @@ clawlock scan --format html -o report.html
 | 5 | Prompt and memory | SOUL / prompt drift plus memory-file checks |
 | 6 | MCP exposure | MCP config and poisoning-surface checks |
 | 7 | CVE matching | Tencent cloud CVE intelligence lookup, enabled by default unless `--no-cve` |
-| 8 | Red Team (optional) | Runs only when `--endpoint` is provided and `--no-redteam` is not used |
+| 8 | Agent security | Included in `scan` with adapter config plus current-workspace code-layer ASI checks |
+| 9 | Red Team (optional) | Runs only when `--endpoint` is provided and `--no-redteam` is not used |
 
 ## Dependency Model
 
@@ -140,7 +141,7 @@ No Node.js, no external scanner binary, and no LLM API key are required for:
 - hardening
 - history and watch mode
 - MCP deep scan
-- Agent-Scan code + config layers
+- Agent-Scan config + current-workspace code layers are included in `scan`
 
 ### 2. Online intelligence without API keys
 

@@ -20,7 +20,7 @@ class TestCliEntry:
         assert result.exit_code == 0
         assert "Agent Security Enforcement" in result.stdout
         assert "██████╗██╗" in result.stdout
-        assert "v2.1.1" in result.stdout
+        assert "v2.2.0" in result.stdout
         assert "g0at" in result.stdout
 
     def test_root_help_still_shows_help(self):
@@ -39,7 +39,7 @@ class TestCliEntry:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.1.1"
+    version: "2.2.0"
     homepage: "https://github.com/g1at/ClawLock"
 ---
 """,
@@ -50,7 +50,7 @@ metadata:
 
         def _fake_http_get_json(url, timeout=5.0):
             if "pypi.org" in url:
-                return {"info": {"version": "2.1.2"}}
+                return {"info": {"version": "2.2.1"}}
             raise AssertionError(url)
 
         def _fake_http_get_text(url, timeout=5.0):
@@ -62,7 +62,7 @@ metadata:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.1.2"
+    version: "2.2.1"
 ---
 """
 
@@ -81,12 +81,12 @@ metadata:
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["package"]["latest_version"] == "2.1.2"
+        assert payload["package"]["latest_version"] == "2.2.1"
         assert payload["package"]["update_available"] is True
-        assert payload["skill"]["local_version"] == "2.1.1"
-        assert payload["skill"]["latest_version"] == "2.1.2"
+        assert payload["skill"]["local_version"] == "2.2.0"
+        assert payload["skill"]["latest_version"] == "2.2.1"
         assert payload["skill"]["remote_url"] == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
-        assert payload["skill"]["installed_package_version"] == "2.1.1"
+        assert payload["skill"]["installed_package_version"] == "2.2.0"
         assert payload["skill"]["matches_installed_package"] is True
         assert "pip install -U clawlock" in payload["suggested_updates"]
         assert (
@@ -102,6 +102,72 @@ metadata:
         assert "Output format: text for terminal review" in result.stdout
         assert "archived review" in result.stdout
         assert "recommended for CI" in result.stdout
+
+
+class TestReports:
+    def test_cve_domain_score_respects_normalized_finding_level(self):
+        from clawlock.reporters import _SCANNER_TO_DOMAIN, _build_domain_report
+        from clawlock.scanners import Finding, WARN
+
+        findings = [
+            Finding(
+                scanner="cve",
+                level=WARN,
+                title="[CVE-2026-99999] test finding",
+                detail="Critical CVE stored as warn-level finding with metadata.",
+                metadata={"severity": "critical"},
+            )
+        ]
+
+        domain_grades, _, domain_scores, _, _ = _build_domain_report(findings)
+        cve_domain = _SCANNER_TO_DOMAIN["cve"]
+
+        assert domain_scores[cve_domain] == 86
+        assert domain_grades[cve_domain] == "A"
+
+    def test_render_scan_report_shows_pass_domains_and_excludes_inactive_domain_weight(
+        self, monkeypatch
+    ):
+        from io import StringIO
+
+        import clawlock.reporters as reporters
+        import clawlock.utils as utils
+        from rich.console import Console
+        from clawlock.scanners import CRIT, Finding
+
+        monkeypatch.delenv("CLAWLOCK_LANG", raising=False)
+        buf = StringIO()
+        monkeypatch.setattr(
+            reporters,
+            "console",
+            Console(file=buf, force_terminal=False, width=140),
+        )
+        monkeypatch.setattr(utils, "device_fingerprint", lambda: "deadbeefcafe")
+        monkeypatch.setattr(
+            utils, "record_scan", lambda adapter, score, high, warn, total: None
+        )
+
+        reporters.render_scan_report(
+            "Generic Claw",
+            "unknown",
+            {
+                "Config": [
+                    Finding(
+                        scanner="config",
+                        level=CRIT,
+                        title="Gateway auth not enabled",
+                        detail="Anyone with port access can connect.",
+                    )
+                ],
+                "Processes": [],
+            },
+            output_format="text",
+        )
+
+        output = buf.getvalue()
+        assert "Score: 15/100" in output
+        assert "- Config Security: B  0/100" in output
+        assert "- Runtime Security: S  100/100" in output
 
 
 class TestHardening:
@@ -505,6 +571,8 @@ class TestAdapters:
 
 class TestCveLookup:
     def _stub_scan_pipeline(self, monkeypatch, cli, captured):
+        import clawlock.integrations as integrations
+
         monkeypatch.setattr(cli, "scan_config", lambda spec: ([], None))
         monkeypatch.setattr(cli, "scan_processes", lambda spec: [])
         monkeypatch.setattr(cli, "scan_credential_dirs", lambda spec: [])
@@ -514,6 +582,7 @@ class TestCveLookup:
         monkeypatch.setattr(cli, "scan_soul", lambda spec, soul_path=None: ([], None))
         monkeypatch.setattr(cli, "scan_memory_files", lambda spec: [])
         monkeypatch.setattr(cli, "scan_mcp", lambda spec, extra_mcp=None: [])
+        monkeypatch.setattr(integrations, "run_agent_scan", lambda **kwargs: [])
         monkeypatch.setattr(
             cli,
             "render_scan_report",
@@ -593,6 +662,56 @@ class TestCveLookup:
         monkeypatch.setattr(integrations, "lookup_cve", _fake_lookup)
         cli.scan(adapter="generic", no_cve=False, no_redteam=True, output_format="json")
         assert calls == [("ZeroClaw", "2.4.6")]
+
+    def test_scan_runs_agent_security_config_and_code_by_default(self, monkeypatch):
+        import clawlock.__main__ as cli
+        import clawlock.adapters as adapters
+        import clawlock.integrations as integrations
+
+        captured = {}
+        self._stub_scan_pipeline(monkeypatch, cli, captured)
+        calls = []
+
+        def _fake_run_agent_scan(**kwargs):
+            calls.append(kwargs)
+            return []
+
+        monkeypatch.setattr(integrations, "run_agent_scan", _fake_run_agent_scan)
+        monkeypatch.setattr(
+            adapters,
+            "load_config",
+            lambda spec: ({"gateway": {"auth": {"token": "x"}}}, "config.json"),
+        )
+
+        cli.scan(adapter="openclaw", no_cve=True, no_redteam=True, output_format="json")
+
+        assert len(calls) == 1
+        assert calls[0]["config"] == {"gateway": {"auth": {"token": "x"}}}
+        assert calls[0]["code_path"] == Path.cwd()
+        assert calls[0]["enable_llm"] is False
+
+    def test_scan_runs_agent_security_even_without_adapter_config(self, monkeypatch):
+        import clawlock.__main__ as cli
+        import clawlock.adapters as adapters
+        import clawlock.integrations as integrations
+
+        captured = {}
+        self._stub_scan_pipeline(monkeypatch, cli, captured)
+        calls = []
+
+        monkeypatch.setattr(adapters, "load_config", lambda spec: ({}, None))
+        monkeypatch.setattr(
+            integrations,
+            "run_agent_scan",
+            lambda **kwargs: calls.append(kwargs) or [],
+        )
+
+        cli.scan(adapter="generic", no_cve=True, no_redteam=True, output_format="json")
+
+        assert len(calls) == 1
+        assert calls[0]["config"] is None
+        assert calls[0]["code_path"] == Path.cwd()
+        assert "Agent Security" in captured["findings_map"] or "Agent 安全" in captured["findings_map"]
 
 
 class TestReportRendering:
@@ -687,6 +806,43 @@ class TestConfigScanner:
                 for f in findings
             )
         )
+
+    def test_native_audit_filters_summary_wrappers_and_keeps_real_issue(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / "c.json").write_text("{}")
+        from clawlock.adapters import get_adapter
+        import clawlock.scanners as scanners
+
+        spec = get_adapter("openclaw")
+        spec.config_paths = [str(tmp_path / "c.json")]
+        monkeypatch.setattr(
+            scanners,
+            "run_cmd",
+            lambda cmd, timeout=30: (
+                0,
+                "\n".join(
+                    [
+                        "CRITICAL",
+                        "Dangerous command policy allows canvas.eval",
+                        "Location: skills/example/skill.json",
+                        "Fix: Restrict the command allowlist.",
+                        "Summary: 1 critical · 0 warn · 0 info",
+                        "WARN",
+                    ]
+                ),
+                "",
+            ),
+        )
+
+        findings, _ = scanners.scan_config(spec)
+
+        assert any(("canvas.eval" in f.title for f in findings))
+        assert all((f.title not in {"CRITICAL", "WARN"} for f in findings))
+        assert all((not f.title.startswith("Summary:") for f in findings))
+        issue = next(f for f in findings if "canvas.eval" in f.title)
+        assert issue.location == "skills/example/skill.json"
+        assert issue.remediation == "Restrict the command allowlist."
 
 
 class TestSkillScanner:

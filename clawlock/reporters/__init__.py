@@ -1,4 +1,4 @@
-﻿"""ClawLock v2.1.1 report renderer - Rich terminal + JSON + HTML output."""
+﻿"""ClawLock v2.2.0 report renderer - Rich terminal + JSON + HTML output."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.text import Text
@@ -61,6 +61,17 @@ _DOMAIN_WEIGHTS: Dict[str, int] = {
 
 _ALL_DOMAINS = list(_DOMAIN_WEIGHTS.keys())
 
+_CHECK_LABEL_TO_DOMAIN: Dict[str, str] = {
+    t("配置审计", "Config"): t("配置安全", "Config Security"),
+    t("进程暴露", "Processes"): t("运行时安全", "Runtime Security"),
+    t("凭证审计", "Credentials"): t("凭据安全", "Credential Security"),
+    t("Skill 供应链", "Skills"): t("供应链安全", "Supply Chain Security"),
+    t("提示词与记忆", "Prompt & Memory"): t("提示词完整性", "Prompt Integrity"),
+    t("MCP", "MCP"): t("MCP 安全", "MCP Security"),
+    t("CVE", "CVEs"): t("漏洞管理", "Vulnerability Mgmt"),
+    t("Agent 安全", "Agent Security"): t("Agent 安全", "Agent Security"),
+}
+
 _GRADE_STYLES = {
     "S": "bold bright_green",
     "A": "bold green",
@@ -95,16 +106,6 @@ _LEVEL_PANEL_COLORS = {
     INFO: "cyan",
 }
 
-# Per-CVE severity penalty for the CVE domain scoring.
-# Maps metadata["severity"] → equivalent (high_count, warn_count) contribution.
-_CVE_SEVERITY_PENALTY: Dict[str, Tuple[float, float]] = {
-    "critical": (1.5, 0.0),   # 比普通 high 更重
-    "high":     (1.0, 0.0),
-    "medium":   (0.0, 1.5),
-    "low":      (0.0, 0.6),
-}
-
-
 _WARN_DECAY = 0.15   # per warn finding
 
 # Per-finding baseline deduction applied to overall score so that
@@ -121,7 +122,7 @@ def _domain_score(findings: List[Finding], *, domain: str = "") -> int:
       - Any HIGH finding → domain score capped at 50
     Then exponential decay on remaining WARN findings.
 
-    For CVE domain: maps CVE severity to equivalent levels before applying rules.
+    Uses the final normalized finding levels produced by the scanners.
     """
     if not findings:
         return 100
@@ -129,28 +130,6 @@ def _domain_score(findings: List[Finding], *, domain: str = "") -> int:
     # Only INFO-level findings (e.g. "skipped", "timeout") → no real issue.
     if all(f.level not in (CRIT, HIGH, WARN) for f in findings):
         return 100
-
-    if domain == t("漏洞管理", "Vulnerability Mgmt"):
-        # CVE domain: determine effective severity from metadata.
-        has_crit = any(
-            (f.metadata.get("severity") if f.metadata else "") in ("critical",)
-            for f in findings
-        )
-        has_high = any(
-            (f.metadata.get("severity") if f.metadata else "") in ("high",)
-            for f in findings
-        )
-        if has_crit:
-            return 0
-        # Count medium/low as warn-equivalent for decay.
-        weighted_w = 0.0
-        for f in findings:
-            sev = f.metadata.get("severity", "medium") if f.metadata else "medium"
-            _, w_pen = _CVE_SEVERITY_PENALTY.get(sev, (0.0, 1.0))
-            weighted_w += w_pen
-        cap = 50 if has_high else 99
-        raw = 100.0 * math.exp(-_WARN_DECAY * weighted_w)
-        return max(0, min(cap, int(round(raw))))
 
     # General domains: hard caps by severity level.
     has_crit = any(f.level == CRIT for f in findings)
@@ -196,8 +175,25 @@ def _score_to_grade(score: int) -> str:
     return "D"
 
 
+def _active_domains_from_findings_map(
+    all_findings_map: Dict[str, List[Finding]]
+) -> Set[str]:
+    active_domains: Set[str] = set()
+    for label, findings in all_findings_map.items():
+        domain = _CHECK_LABEL_TO_DOMAIN.get(label)
+        if domain:
+            active_domains.add(domain)
+        for finding in findings:
+            mapped = _SCANNER_TO_DOMAIN.get(finding.scanner)
+            if mapped:
+                active_domains.add(mapped)
+    return active_domains
+
+
 def _build_domain_report(
     all_findings: List[Finding],
+    *,
+    active_domains: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, List[Finding]], Dict[str, int], str, int]:
     """Classify findings into domains, compute per-domain grades/scores and overall.
 
@@ -212,13 +208,17 @@ def _build_domain_report(
     domain_grades: Dict[str, str] = {}
     domain_scores: Dict[str, int] = {}
     for domain in _ALL_DOMAINS:
-        domain_grades[domain] = _compute_domain_grade(domain_findings[domain])
         domain_scores[domain] = _domain_score(domain_findings[domain], domain=domain)
+        domain_grades[domain] = _compute_domain_grade(domain_findings[domain])
 
-    # Weighted average score across domains.
-    total_weight = sum(_DOMAIN_WEIGHTS.values())
+    weighted_domains = [d for d in _ALL_DOMAINS if not active_domains or d in active_domains]
+    if not weighted_domains:
+        weighted_domains = list(_ALL_DOMAINS)
+
+    # Weighted average score across executed domains.
+    total_weight = sum(_DOMAIN_WEIGHTS[d] for d in weighted_domains)
     weighted_sum = sum(
-        domain_scores[d] * _DOMAIN_WEIGHTS[d] for d in _ALL_DOMAINS
+        domain_scores[d] * _DOMAIN_WEIGHTS[d] for d in weighted_domains
     )
     raw_score = weighted_sum / total_weight
 
@@ -415,13 +415,14 @@ def render_scan_report(
     """Render scan results in text, JSON, or HTML."""
     scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_f = [f for fs in all_findings_map.values() for f in fs]
+    active_domains = _active_domains_from_findings_map(all_findings_map)
     n_crit = sum(1 for f in all_f if f.level == CRIT)
     n_high = sum(1 for f in all_f if f.level == HIGH)
     nc = n_crit + n_high  # combined for scoring compatibility
     nw = sum(1 for f in all_f if f.level == WARN)
 
     domain_grades, domain_findings, domain_scores, overall_grade, score = (
-        _build_domain_report(all_f)
+        _build_domain_report(all_f, active_domains=active_domains)
     )
 
     from ..utils import device_fingerprint, record_scan
@@ -432,7 +433,7 @@ def render_scan_report(
     if output_format == "json":
         out = {
             "tool": "ClawLock",
-            "version": "2.1.1",
+            "version": "2.2.0",
             "time": scan_time,
             "adapter": adapter_name,
             "device": dev_fp,
@@ -502,12 +503,10 @@ def render_scan_report(
 
     _print_section(f"## {t('安全域评级', 'Security Domain Grades')}")
     for domain in _ALL_DOMAINS:
+        if active_domains and domain not in active_domains:
+            continue
         findings = domain_findings[domain]
         grade = domain_grades[domain]
-        if not findings and grade == "S":
-            has_scanner = any(_SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f)
-            if not has_scanner:
-                continue
         crit_count, high_count, warn_count, _ = _severity_counts(findings)
         line = Text()
         line.append(f"- {domain}: ", style="default")
@@ -575,8 +574,9 @@ def _render_html(
 ):
     """Generate a modern standalone HTML report with dark mode support."""
     all_f = [f for fs in all_findings_map.values() for f in fs]
+    active_domains = _active_domains_from_findings_map(all_findings_map)
     domain_grades, domain_findings, domain_scores, overall_grade, score = (
-        _build_domain_report(all_f)
+        _build_domain_report(all_f, active_domains=active_domains)
     )
     n_crit = sum(1 for f in all_f if f.level == CRIT)
     n_high = sum(1 for f in all_f if f.level == HIGH)
@@ -588,12 +588,11 @@ def _render_html(
     # Build domain cards
     domain_cards: List[str] = []
     for domain in _ALL_DOMAINS:
+        if active_domains and domain not in active_domains:
+            continue
         g = domain_grades[domain]
         dfs = domain_findings[domain]
         ds = domain_scores[domain]
-        if not dfs and g == "S":
-            if not any(_SCANNER_TO_DOMAIN.get(f.scanner) == domain for f in all_f):
-                continue
         g_color = _GRADE_HTML_COLORS.get(g, "#888")
         dc = sum(1 for f in dfs if f.level == CRIT)
         dh = sum(1 for f in dfs if f.level == HIGH)
@@ -656,7 +655,7 @@ def _render_html(
     _title = t("ClawLock 安全报告", "ClawLock Security Report")
     _lbl_domains = t("安全域评级", "Security Domains")
     _lbl_findings = t("详细发现", "Detailed Findings")
-    _footer1 = t("由 ClawLock v2.1.1 生成", "Generated by ClawLock v2.1.1")
+    _footer1 = t("由 ClawLock v2.2.0 生成", "Generated by ClawLock v2.2.0")
     _footer2 = t("静态分析仅反映当前可见的代码和配置。",
                   "Static analysis reflects the currently visible code and config only.")
 
