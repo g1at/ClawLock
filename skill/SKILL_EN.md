@@ -10,9 +10,9 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.0.0"
-    homepage: "https://github.com/g1at/clawlock"
-    author: "g1at"
+    version: "2.1.0"
+    homepage: "https://github.com/g1at/ClawLock"
+    author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
     platforms: [linux, macos, windows, android-termux]
     requires:
@@ -103,6 +103,41 @@ Before actually calling `clawlock`, perform these minimum checks:
 2. Confirm the scan target is exactly what the user asked for; do not accidentally point a test command at production endpoints or unrelated directories.
 3. If the user wants a local-first or offline evaluation, disable optional online capabilities before proceeding.
 4. If running red-team checks, confirm the current environment is allowed to reach the target endpoint and that the target is appropriate for security testing.
+
+---
+
+## Version Update Preflight
+
+Before any security scan, skill precheck, hardening flow, or drift check, **default to checking whether `clawlock` has a newer release on PyPI and whether the latest skill file in the GitHub repository is newer than the local one**:
+
+```bash
+clawlock version --check-update --json --skill-path /path/to/SKILL.md
+```
+
+Execution rules:
+
+1. Treat the **latest PyPI version** as the single source of truth for the `clawlock` release.
+2. Treat the **latest skill file on the GitHub repository `main` branch** as the source of truth for the skill version:
+   - Chinese skill: `https://github.com/g1at/ClawLock/blob/main/skill/SKILL.md`
+   - English skill: `https://github.com/g1at/ClawLock/blob/main/skill/SKILL_EN.md`
+3. If an update is available or the GitHub skill file is newer than the local copy, tell the user clearly:
+   - the currently installed local version
+   - the latest PyPI version
+   - the latest skill version on GitHub
+   - the update action that will be taken
+4. Then **ask the user** whether they want to update before continuing with the security task.
+5. If the user agrees:
+   - the skill should perform the update directly inside the current Claw conversation rather than only dumping manual steps to the user
+   - package update action: run `pip install -U clawlock`
+   - skill update action: fetch the latest language-specific `skill/SKILL*.md` from the GitHub repository and replace the local skill file before continuing
+   - after updating, run the version check again and confirm that both the package and the skill are current
+6. Only fall back to manual instructions when the current Claw product lacks the required tool access, network access, or file-write capability; if so, explicitly explain why the skill could not complete the update itself.
+7. If the user declines: continue with the current version, but explicitly state that the following results are based on the currently installed version.
+8. If the version check fails, times out, or the network is unavailable: continue the security flow, but explicitly state that the update check was not completed.
+
+Privacy boundary:
+- This preflight performs online version lookups.
+- It sends only the package name needed for the PyPI lookup and reads the public skill file from the GitHub repository; **it must not send local code contents, credentials, or conversation history**.
 
 ---
 

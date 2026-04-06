@@ -9,9 +9,9 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.0.0"
-    homepage: "https://github.com/g1at/clawlock"
-    author: "g1at"
+    version: "2.1.0"
+    homepage: "https://github.com/g1at/ClawLock"
+    author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
     platforms: [linux, macos, windows, android-termux]
     requires:
@@ -101,6 +101,41 @@ clawlock scan --format html   # HTML 报告
 2. 确认扫描目标是用户明确指定的对象，不要把测试命令误打到生产地址或无关目录。
 3. 如用户明确要求本地优先或离线评估，优先关闭可选在线能力，再继续执行。
 4. 如运行红队测试，先确认当前环境允许访问目标端点，且该目标确实适合做安全测试。
+
+---
+
+## 版本更新预检
+
+在进入任何安全扫描、导入预检、加固或 drift 检查前，**默认先检查 `clawlock` 在 PyPI 上是否有新版本，以及 GitHub 仓库中的最新 skill 文件是否比本地更新**：
+
+```bash
+clawlock version --check-update --json --skill-path /path/to/SKILL.md
+```
+
+执行规则：
+
+1. `clawlock` 本体版本以 **PyPI 最新版本** 作为唯一事实来源。
+2. skill 版本以 **GitHub 仓库 `main` 分支中的最新 skill 文件** 为准：
+   - 中文版 skill 对应 `https://github.com/g1at/ClawLock/blob/main/skill/SKILL.md`
+   - 英文版 skill 对应 `https://github.com/g1at/ClawLock/blob/main/skill/SKILL_EN.md`
+3. 如果检测到有新版本，或发现 GitHub 中的最新 skill 文件比本地更新，先明确告诉用户：
+   - 当前本地版本
+   - PyPI 最新版本
+   - GitHub 上 skill 的最新版本
+   - 将要执行的更新动作
+4. 然后**让用户选择**是否先更新，再继续后续安全操作。
+5. 如果用户同意更新：
+   - 由 skill 在当前 Claw 对话中直接执行更新，不要只把手工命令抛给用户
+   - `clawlock` 本体更新动作：执行 `pip install -U clawlock`
+   - skill 更新动作：从 GitHub 仓库拉取对应语言版本的最新 `skill/SKILL*.md`，替换本地 skill 文件后再继续
+   - 更新完成后，再重新执行版本检查，确认本体与 skill 都已到最新状态
+6. 如果当前 Claw 产品没有足够的工具权限、网络权限或文件写入能力，才退回为“告诉用户需要执行什么更新动作”，并明确说明为什么这次无法由 skill 直接完成更新。
+7. 如果用户拒绝更新：继续使用当前版本执行，但必须明确说明“以下结果基于当前已安装版本”。
+8. 如果版本检查失败、超时或网络不可用：继续后续扫描，但必须明确写出“本次未完成版本更新检查”。
+
+隐私边界：
+- 该预检会访问在线版本源。
+- 只发送查询 PyPI 所需的包名，并读取 GitHub 仓库中的公开 skill 文件；**不发送本地代码内容、凭证、会话记录**。
 
 ---
 
