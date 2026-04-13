@@ -1,4 +1,4 @@
-"""ClawLock v2.2.1 CLI - 12 commands."""
+"""ClawLock v2.2.2 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -169,8 +169,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.2.1 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.2.1 - security scan and hardening for Claw platforms",
+        "ClawLock v2.2.2 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.2.2 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,

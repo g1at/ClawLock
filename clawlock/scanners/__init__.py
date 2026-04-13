@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.2.1 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.2.2 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -556,7 +556,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("bash 反弹 shell。", "Bash reverse shell."),
     ),
     (
-        "\\bnc\\b.{0,30}-e\\s+(?:/bin/bash|/bin/sh|sh)",
+        "(?i)\\bnc\\b.{0,30}-e\\s+(?:/bin/(?:ba)?sh\\b|\\bsh\\b|\\bcmd(?:\\.exe)?\\b|\\bpowershell(?:\\.exe)?\\b)",
         CRIT,
         t("反弹 Shell (nc -e)", "Reverse shell (nc -e)"),
         t("netcat 反弹 shell。", "Netcat reverse shell."),
@@ -574,10 +574,10 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("加密货币挖矿特征。", "Cryptocurrency mining signature detected."),
     ),
     (
-        "\\brm\\s+-rf\\s+(?:/root|/home|/etc|/var|/usr|~)\\b",
+        "(?i)(?:\\brm\\s+-rf\\s+(?:/root|/home|/etc|/var|/usr|~)\\b|\\b(?:rmdir|rd)\\s+/[sq]\\s+/[sq]\\s+[A-Za-z]:\\\\)",
         CRIT,
         t("危险批量删除", "Dangerous mass deletion"),
-        t("rm -rf 指向系统关键目录。", "rm -rf targets critical system directories."),
+        t("rm -rf 或 rmdir /s /q 指向系统关键目录。", "rm -rf or rmdir /s /q targets critical system directories."),
     ),
     (
         "(?i)ignore\\s+(?:all\\s+)?(?:previous|above)\\s+instructions?",
@@ -628,10 +628,10 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("mkfifo+nc 组合反弹 shell。", "mkfifo+nc reverse shell combo."),
     ),
     (
-        "(?i)(?:chmod\\s+(?:777|a\\+rwx)\\s+)",
+        "(?i)(?:chmod\\s+(?:777|a\\+rwx)\\s+|\\bicacls\\b[^\\n]{0,80}/grant\\b[^\\n]{0,40}(?:Everyone|\\*S-1-1-0))",
         CRIT,
-        t("危险权限变更 (chmod 777)", "Dangerous permission change (chmod 777)"),
-        t("将文件设为全局可读写执行。", "File set to world-readable/writable/executable."),
+        t("危险权限变更", "Dangerous permission change"),
+        t("chmod 777 或 icacls /grant Everyone 将文件设为全局可访问。", "chmod 777 or icacls /grant Everyone makes files world-accessible."),
     ),
     (
         "忽略(之前|上面|所有)(的)?(指令|规则|限制|约束)",
@@ -688,7 +688,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("通过 export 设置可注入代码的环境变量。", "Env var set via export that enables code injection."),
     ),
     (
-        "(?i)(?:fsutil|format|diskpart|dd\\s+if=.*of=/dev/)",
+        "(?i)(?:\\bfsutil\\b|\\bformat\\b[^\\n]{0,20}[A-Za-z]:|\\bformat\\.com\\b|\\bdiskpart\\b|\\bmkfs(?:\\.[a-z0-9]+)?\\b|\\bdiskutil\\s+(?:erase|partition|zero|secure)|\\bwipefs\\b|\\bdd\\s+if=.*of=/dev/)",
         HIGH,
         t("磁盘级危险操作", "Disk-level dangerous operation"),
         t("磁盘格式化或低级写入操作。", "Disk formatting or low-level write operation."),
@@ -712,7 +712,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("写入 Windows Run/RunOnce 自启动注册表项。", "Writes to Windows Run/RunOnce autorun registry keys."),
     ),
     (
-        "(?i)(?:systemctl\\s+enable|launchctl\\s+load)\\s+",
+        "(?i)(?:systemctl\\s+enable|launchctl\\s+load|\\bsc(?:\\.exe)?\\s+create\\b|\\bNew-Service\\b)\\s+",
         WARN,
         t("注册系统服务", "System service registration"),
         t("注册持久化系统服务。", "Persistent system service registered."),
@@ -762,7 +762,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("访问系统个人目录。", "Accessing user's personal directory."),
     ),
     (
-        "(?i)open\\([\"\\'](?:/etc/passwd|/etc/shadow|~/.ssh/|~/.aws/credentials)",
+        "(?i)open\\([\"\\'](?:/etc/passwd|/etc/shadow|~[/\\\\]\\.ssh[/\\\\]|~[/\\\\]\\.aws[/\\\\]credentials|[A-Za-z]:[/\\\\].*System32[/\\\\]config[/\\\\](?:SAM|SYSTEM|SECURITY))",
         WARN,
         t("访问系统敏感文件", "Accessing sensitive system file"),
         t("读取敏感系统文件。", "Reading sensitive system file."),
@@ -811,13 +811,13 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("用户可控输入直接传入 eval/exec/compile。", "User-controlled input passed directly to eval/exec/compile."),
     ),
     (
-        "(?i)(?:os\\.chmod|os\\.chown)\\s*\\(.*/etc/|/var/",
+        "(?i)(?:os\\.chmod|os\\.chown)\\s*\\(.*(?:/etc/|/var/|\\bWindows\\b|\\bSystem32\\b|\\bProgram.Files\\b)",
         WARN,
         t("修改系统目录权限", "System directory permission change"),
-        t("修改 /etc 或 /var 下的权限。", "Modifying permissions under /etc or /var."),
+        t("修改系统关键目录的权限。", "Modifying permissions of critical system directories."),
     ),
     (
-        "(?i)(?:shutil\\.rmtree|os\\.removedirs)\\s*\\(.*/home|/root|/etc|/var",
+        "(?i)(?:shutil\\.rmtree|os\\.removedirs)\\s*\\(.*(?:/home|/root|/etc|/var|\\bWindows\\b|\\bSystem32\\b|\\bProgram.Files\\b)",
         HIGH,
         t("递归删除系统目录", "Recursive system directory deletion"),
         t("递归删除系统关键目录。", "Recursive deletion of critical system directories."),
