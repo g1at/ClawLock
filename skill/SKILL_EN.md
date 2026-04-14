@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.3.0"
+    version: "2.3.1"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
