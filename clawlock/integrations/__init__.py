@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.3.0 integrations — cloud intelligence,
+ClawLock v2.3.1 integrations — cloud intelligence,
 external scanner, and Agent-Scan.
 """
 
@@ -55,16 +55,36 @@ def _is_version_fixed(current: str, fixed: str) -> bool:
 
 
 async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Finding]:
-    params: dict = {"name": product}
+    # Upstream /advisories 500s when called with {name=<MixedCase>, version=...}
+    # but works with lowercased name, and also works when version is omitted.
+    # Try the normal call first; on 5xx fall back to lowercase name, then to
+    # a version-less query and rely on client-side _is_version_fixed filtering.
+    base_params: dict = {"name": product}
     if version:
-        params["version"] = version
-    try:
+        base_params["version"] = version
+
+    async def _fetch(params: dict) -> dict:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(f"{CLOUD_BASE}/advisories", params=params)
             r.raise_for_status()
-            data = r.json()
+            return r.json()
+
+    try:
+        data = await _fetch(base_params)
     except httpx.TimeoutException:
         return [Finding("cve", INFO, t("CVE 情报查询超时", "CVE intelligence query timed out"), t("建议稍后重试。", "Please retry later."))]
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status >= 500 and version:
+            try:
+                data = await _fetch({"name": product.lower(), "version": version})
+            except Exception:
+                try:
+                    data = await _fetch({"name": product})
+                except Exception as e2:
+                    return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"HTTP {status}; fallback: {str(e2)[:80]}")]
+        else:
+            return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"HTTP {status}")]
     except Exception as e:
         return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"{str(e)[:100]}")]
     advisories = (
