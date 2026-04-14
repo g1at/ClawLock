@@ -38,6 +38,9 @@ clawlock skill /path/to/skill            # 审计单个 skill
 clawlock soul                            # 检查 prompt / memory 漂移
 clawlock harden                          # 交互式加固向导
 clawlock harden --auto-fix               # 自动应用安全本地修复
+clawlock harden --from-scan --auto-fix   # 仅修复上次扫描发现的问题
+clawlock harden --auto-fix --verify      # 自动修复后验证结果
+clawlock harden --rollback               # 撤销上一次自动修复
 clawlock mcp-scan ./mcp-server/src       # MCP 源码深度扫描
 clawlock agent-scan --code ./agent/src   # 独立执行 OWASP ASI Agent 扫描
 clawlock scan --format html -o report.html
@@ -201,14 +204,26 @@ ClawLock 当前内置 **18 项加固措施**。
 - `clawlock harden`：交互式模式
 - `clawlock harden --auto`：应用安全、非破坏性的动作，并输出仅建议类项的人工指导
 - `clawlock harden --auto-fix`：只执行真正安全的本地自动修复
+- `clawlock harden --from-scan`：仅展示与最近一次扫描发现相关的加固措施
+- `clawlock harden --auto-fix --verify`：自动修复后重新扫描验证效果
+- `clawlock harden --rollback`：撤销上一次自动修复操作（从备份还原）
 
-当前需要特别注意：
+可自动修复的措施：
+
+| ID | 措施 | 说明 |
+|----|------|------|
+| H003 | 缩短会话保留期 | 将配置文件中的 `sessionRetentionDays` 设为 7 |
+| H007 | 建立提示词基线 | 为 SOUL.md / CLAUDE.md / MEMORY.md 记录 SHA-256 基线 |
+| H008 | 启用审批模式 | 将配置文件中的 `approvalMode` 设为 `”always”` |
+| H009 | 收紧凭证权限 | 对配置目录和凭证文件执行 `chmod 600`/`700` 或 `icacls` |
+
+所有配置修改前会自动备份到 `~/.clawlock/backups/`。
+
+其他行为：
 
 - 加固向导会把措施分成 **现在可安全应用 / 仅建议 / 需要确认** 三组展示
-- 目前只有 **`H009`** 会真正执行本地自动修复
-- `H009` 会收紧支持的配置目录以及 `.npmrc`、`.pypirc`、`.netrc` 等常见家目录凭证文件权限
 - 有 UX 影响的措施在交互模式下仍然需要明确确认
-- 仅指导类措施不会再被误报成“已完成”
+- 仅指导类措施不会再被误报成”已完成”
 
 ## 多平台支持
 
@@ -253,7 +268,7 @@ cp skill/SKILL.md ~/.openclaw/skills/clawlock/
 git clone https://github.com/g1at/clawlock.git
 cd clawlock
 pip install -e ".[dev]"
-pytest tests/test_clawlock.py -v    # 104 tests
+pytest tests/test_clawlock.py -v    # 110 tests
 ```
 
 ## 贡献

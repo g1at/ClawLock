@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.2.2"
+    version: "2.3.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -336,35 +336,121 @@ clawlock precheck ./new-skill/SKILL.md
 ## Feature 4: 安全加固向导
 
 ```bash
-clawlock harden              # 交互式
-clawlock harden --auto       # 应用安全动作并输出人工指导
-clawlock harden --auto-fix   # 自动修复真正安全的本地变更
+clawlock harden                          # 交互式
+clawlock harden --auto                   # 应用安全动作并输出人工指导
+clawlock harden --auto-fix               # 自动修复真正安全的本地变更
+clawlock harden --from-scan --auto-fix   # 仅处理上次 scan 报告的高危项
+clawlock harden --verify                 # 加固后重新校验、生成差异报告
+clawlock harden --rollback               # 按备份回滚最近一次加固动作
 ```
 
-| ID | 措施 | 体验影响 | 需确认 | Auto-fix |
-|----|------|---------|--------|---------|
-| H001 | 限制文件访问到工作区 | ⚠️ 跨目录 skill 失效 | 是 | 否 |
-| H002 | 开启 Gateway 鉴权 | ⚠️ 外部工具需重配 token | 是 | 否 |
-| H003 | 缩短会话日志保留 | ⚠️ 历史不可查 | 是 | 否 |
-| H004 | 关闭浏览器控制 | ⚠️ 依赖浏览器的 skill 停用 | 是 | 否 |
-| H005 | 配置网络白名单 | 无影响 | 否 | 否 |
-| H006 | 审核 MCP 配置 | 仅指导 | 否 | 否 |
-| H007 | 建立提示词/记忆基准 | 无影响 | 否 | 否 |
-| H008 | 启用操作审批 | ⚠️ 每次高危操作需确认 | 是 | 否 |
-| H009 | 收紧凭证目录权限 | 无影响 | 否 | ✅ 是 |
-| H010 | 配置速率限制 | 无影响 | 否 | 否 |
-| H011 | 禁止下载即执行 / 运行时远程安装 | ⚠️ 自举安装脚本可能失效 | 是 | 否 |
-| H012 | 禁止 Windows LOLBins / 脚本宿主 | ⚠️ Windows 管理脚本可能失效 | 是 | 否 |
-| H013 | 清理持久化落点 | ⚠️ 后台任务可能停止 | 是 | 否 |
-| H014 | 禁止隧道 / 反向代理 | ⚠️ 远程调试隧道可能失效 | 是 | 否 |
-| H015 | 收紧 MCP 鉴权 / 绑定 / CORS | ⚠️ 外部 MCP 工具可能需重配 | 是 | 否 |
-| H016 | 禁止用户控制动态模块加载 | ⚠️ 热加载插件可能失效 | 是 | 否 |
-| H017 | 对提示词与凭证日志脱敏 | ⚠️ 调试日志会变少 | 是 | 否 |
-| H018 | 清理不安全 prompt / skill 指令 | ⚠️ 不安全自动化措辞会失效 | 是 | 否 |
+| ID | 措施 | 体验影响 | 需确认 | Auto-fix | LLM 可协助修复 |
+|----|------|---------|--------|---------|--------------|
+| H001 | 限制文件访问到工作区 | ⚠️ 跨目录 skill 失效 | 是 | 否 | ✅ |
+| H002 | 开启 Gateway 鉴权 | ⚠️ 外部工具需重配 token | 是 | 否 | ✅ |
+| H003 | 缩短会话日志保留 | ⚠️ 历史不可查 | 是 | ✅ 是 | — |
+| H004 | 关闭浏览器控制 | ⚠️ 依赖浏览器的 skill 停用 | 是 | 否 | ✅ |
+| H005 | 配置网络白名单 | 无影响 | 否 | 否 | ✅ |
+| H006 | 审核 MCP 配置 | 仅指导 | 否 | 否 | ⚠️ 协助核查 |
+| H007 | 建立提示词/记忆基准 | 无影响 | 否 | ✅ 是 | — |
+| H008 | 启用操作审批 | ⚠️ 每次高危操作需确认 | 是 | ✅ 是 | — |
+| H009 | 收紧凭证目录权限 | 无影响 | 否 | ✅ 是 | — |
+| H010 | 配置速率限制 | 无影响 | 否 | 否 | ✅ |
+| H011 | 禁止下载即执行 / 运行时远程安装 | ⚠️ 自举安装脚本可能失效 | 是 | 否 | ⚠️ 协助核查 |
+| H012 | 禁止 Windows LOLBins / 脚本宿主 | ⚠️ Windows 管理脚本可能失效 | 是 | 否 | ⚠️ 协助核查 |
+| H013 | 清理持久化落点 | ⚠️ 后台任务可能停止 | 是 | 否 | ⚠️ 协助核查 |
+| H014 | 禁止隧道 / 反向代理 | ⚠️ 远程调试隧道可能失效 | 是 | 否 | ⚠️ 协助核查 |
+| H015 | 收紧 MCP 鉴权 / 绑定 / CORS | ⚠️ 外部 MCP 工具可能需重配 | 是 | 否 | ✅ |
+| H016 | 禁止用户控制动态模块加载 | ⚠️ 热加载插件可能失效 | 是 | 否 | ⚠️ 协助核查 |
+| H017 | 对提示词与凭证日志脱敏 | ⚠️ 调试日志会变少 | 是 | 否 | ✅ |
+| H018 | 清理不安全 prompt / skill 指令 | ⚠️ 不安全自动化措辞会失效 | 是 | 否 | ✅ |
 
 **规则：需二次确认的措施必须先向用户展示体验影响（黄色），等待明确 `y` 后才执行。默认 No。**
 
-**执行说明：** 加固向导会按「现在可安全应用 / 仅建议 / 需要确认」三组展示措施。当前只有 `H009` 会实际执行本地自动修复。其余措施主要提供配置或运维侧的加固指导，除非真的发生了改动，否则不要描述为“已应用”。
+**执行说明：** 加固向导按「可直接自动修复 / LLM 辅助可修复 / 仅给指导」分组展示措施。`H003` / `H007` / `H008` / `H009` 会执行本地自动修复（写入前会备份到 `~/.clawlock/backups/<timestamp>/` 并记录到 `~/.clawlock/hardening_log.json`，可通过 `clawlock harden --rollback` 回滚）。其余措施多为配置或运维变更，若未真正改动，不应描述为"已应用"。
+
+### LLM 辅助加固流程
+
+对于上表 `Auto-fix = 否` 的项，Claw LLM 可使用自身的文件编辑能力协助完成剩余加固。按以下五步执行，**不得跳过任何一步**：
+
+**Step 1 — 获取结构化发现**
+
+```bash
+clawlock scan --format json
+```
+
+从输出的 `findings` 数组按 `level ∈ {critical, high, medium}` 过滤出待修复项，保留 `title` / `location` / `detail` 三个字段作为后续修复依据。
+
+**Step 2 — 优先执行 CLI 自动修复**
+
+```bash
+clawlock harden --from-scan --auto-fix
+```
+
+这一步会基于 Step 1 的结果，只对命中的发现执行 `H003` / `H007` / `H008` / `H009` 自动修复，并生成备份与日志。**先跑这一步再让 LLM 介入**，避免 LLM 重复处理 CLI 已能解决的项。
+
+**Step 3 — LLM 按发现定位配置**
+
+对每个剩余的 guidance-only 发现，依据 `location` 字段找到目标文件。常见目标：
+
+- `~/.openclaw/config.*` · `~/.zeroclaw/config.*` · `~/.claude/settings.json`
+- MCP server JSON（通常在 `~/.claude/mcp_servers.json` 或项目级 `.mcp.json`）
+- Skill 脚本 / SKILL.md / SOUL.md
+
+**必须先 Read 再改，不要盲写。** 如果文件不存在或无权限，跳过并说明原因。
+
+**Step 4 — 展示"当前 → 目标 + 体验影响"并等用户确认**
+
+每个拟修改项按以下格式展示给用户，**默认 No**：
+
+```md
+- 文件：{path}
+- 当前：{current_value}
+- 目标：{target_value}
+- 修复依据：{finding title}（{finding level}）
+- 体验影响：{上表对应的 UX 影响}
+- 是否应用？(y/N)
+```
+
+用户逐项回答 `y` 才执行。批量 `y` 需用户明确表达。
+
+**Step 5 — 应用并二次验证**
+
+应用后运行：
+
+```bash
+clawlock harden --verify
+```
+
+`--verify` 会重新跑 `scan_config` 与 `scan_credential_dirs`，对比加固前后的 critical / high 数量并输出差异报告。如果剩余风险未下降，向用户说明原因（常见：文件未落盘 / 写到错路径 / 字段名写错），**不得将 Step 5 省略**。
+
+### LLM 辅助加固的安全约束
+
+- **必须备份：** 在写入前，把原文件复制到 `~/.clawlock/backups/<timestamp>/` 并在 `~/.clawlock/hardening_log.json` 追加一条记录（measure_id / files_changed / backup_path），使 `clawlock harden --rollback` 能按统一入口回滚
+- **不得越权：** 禁止 `sudo` / `chmod -R 777` / 跨用户目录写入 / 系统级服务安装 / 关闭 SELinux 或 AppArmor
+- **最小必要变更：** 不对不相关配置做顺带优化或美化；保留原注释、字段顺序、缩进风格
+- **不伪造"已应用"：** 若某项需用户手动操作（如禁用 Windows 服务、移除 cron 任务、卸载恶意 skill），只写"建议手动执行并给出命令"，不得报告为已完成
+- **凭证不入日志：** LLM 补齐的 token / secret 必须引用 env 变量或 secret 管理器占位符（如 `${GATEWAY_TOKEN}`），严禁将实际值写进 config 或对话
+- **跨平台拒写：** 当要改的路径在当前 OS 上不存在或权限不足时，直接跳过并明确说明，不要在无关目录制造新文件
+- **信任边界：** 只基于 `clawlock scan` 的 findings 采取行动；不得自行扩大修复范围，不得编辑 findings 未命中的文件
+
+### LLM 可修复措施的具体映射
+
+| 措施 | LLM 的具体动作 |
+|------|--------------|
+| H001 | 修改 Claw 配置 `allowedDirectories`，用当前工作区绝对路径替换 `/` 或 `~` |
+| H002 | 在 Claw 配置里把 `gatewayAuth` 改为 `true`，并让用户填入 token env 变量名（不是明文） |
+| H004 | 设 `enableBrowserControl: false`；如存在依赖浏览器的 skill，先提醒用户这些 skill 会停用 |
+| H005 | 为 `allowNetworkAccess: true` 补出明确的 `allowedDomains` 白名单（让用户逐条确认） |
+| H006 | 按 Feature 1 Step 6 的 10 个 MCP 风险信号逐条核对，列出差异后让用户决定 |
+| H010 | 在 Claw 配置里加 `rateLimit: { enabled: true, requestsPerMinute: 60 }` |
+| H011–H014 | 协助搜索 skill / script / cron / launchctl / 计划任务 中的可疑持久化或隧道命令，列给用户确认后移除（不自动删） |
+| H015 | 修改 MCP server JSON：`host` 改为 `127.0.0.1`、启用鉴权、限制 CORS `origin` |
+| H016 | 搜索 skill 中的 `import(user_input)` / `importlib.import_module(user_input)` / `require(user_input)` 并引导收紧 |
+| H017 | 在日志 / 提示词配置里启用脱敏开关，或对敏感字段加 mask |
+| H018 | 按 `scan_skill` 报告的行号，将不安全的措辞改写为合规表达（如去掉"绕过确认""跳过审计"字样） |
+
+不在此表的项视为**仅给指导**，LLM 不得尝试自动改写。
 
 ---
 

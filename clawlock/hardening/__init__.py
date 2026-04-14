@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Union
+from typing import Callable, Dict, List, Optional, Union
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,6 +15,72 @@ from ..i18n import t
 from ..utils import IS_ANDROID, IS_MACOS, IS_WINDOWS, platform_label
 
 console = Console()
+
+# ─── Backup / rollback infrastructure ────────────────────────────────────────
+
+HARDENING_LOG = Path.home() / ".clawlock" / "hardening_log.json"
+
+
+def _load_hardening_log() -> list:
+    try:
+        if HARDENING_LOG.exists():
+            return json.loads(HARDENING_LOG.read_text())
+    except Exception:
+        pass
+    return []
+
+
+def _save_hardening_log(records: list):
+    try:
+        HARDENING_LOG.parent.mkdir(parents=True, exist_ok=True)
+        HARDENING_LOG.write_text(json.dumps(records[-200:], ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def _backup_file(path: Path) -> Optional[Path]:
+    """Create a timestamped backup of a file before modification. Returns backup path."""
+    if not path.exists():
+        return None
+    backup_dir = Path.home() / ".clawlock" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"{path.name}.{ts}.bak"
+    try:
+        shutil.copy2(path, backup_path)
+        return backup_path
+    except Exception:
+        return None
+
+
+def _record_hardening_action(measure_id: str, files_changed: Dict[str, str]):
+    """Record an auto-fix action with backup paths for rollback."""
+    log = _load_hardening_log()
+    log.append({
+        "time": datetime.now().isoformat(),
+        "measure": measure_id,
+        "files": files_changed,  # {original_path: backup_path}
+    })
+    _save_hardening_log(log)
+
+
+def rollback_last(count: int = 1) -> int:
+    """Rollback the last N hardening actions. Returns number of files restored."""
+    log = _load_hardening_log()
+    restored = 0
+    for _ in range(min(count, len(log))):
+        entry = log.pop()
+        for orig, backup in entry.get("files", {}).items():
+            orig_p, backup_p = Path(orig), Path(backup)
+            if backup_p.exists():
+                try:
+                    shutil.copy2(backup_p, orig_p)
+                    restored += 1
+                    console.print(f"  [green]{t('已还原', 'Restored')}: {orig}[/green]")
+                except Exception:
+                    console.print(f"  [red]{t('还原失败', 'Restore failed')}: {orig}[/red]")
+    _save_hardening_log(log)
+    return restored
 TextValue = Union[str, Callable[[], str]]
 
 
@@ -130,9 +199,10 @@ def _persistence_guidance() -> bool:
 
 
 def _fix_cred_perms():
-    from ..utils import fix_file_permission
+    from ..utils import fix_file_permission, check_file_permission
 
     fixed = 0
+    changed_files: Dict[str, str] = {}
     for d in [
         Path.home() / ".openclaw",
         Path.home() / ".zeroclaw",
@@ -154,8 +224,10 @@ def _fix_cred_perms():
                     ".env",
                     ".rc",
                 ):
-                    fix_file_permission(f, private=True)
-                    _g(f"{t('已收紧', 'Tightened')}: {f}")
+                    world_r, group_r, _ = check_file_permission(f)
+                    if world_r or group_r:
+                        fix_file_permission(f, private=True)
+                        _g(f"{t('已收紧', 'Tightened')}: {f}")
     for f in [
         Path.home() / ".npmrc",
         Path.home() / ".pypirc",
@@ -164,7 +236,122 @@ def _fix_cred_perms():
         if f.exists() and fix_file_permission(f, private=True):
             fixed += 1
             _g(f"{t('已收紧', 'Tightened')}: {f}")
+    if fixed:
+        _record_hardening_action("H009", changed_files)
     return fixed > 0
+
+
+def _find_config_files() -> List[Path]:
+    """Find all Claw product config files."""
+    configs = []
+    for d in [
+        Path.home() / ".openclaw",
+        Path.home() / ".zeroclaw",
+        Path.home() / ".claude",
+        Path.home() / ".config" / "openclaw",
+        Path.home() / ".config" / "zeroclaw",
+        Path.home() / ".config" / "claude",
+    ]:
+        if d.exists():
+            for f in d.iterdir():
+                if f.is_file() and f.suffix in (".json",):
+                    configs.append(f)
+    return configs
+
+
+def _patch_json_config(path: Path, key: str, value, measure_id: str) -> bool:
+    """Safely patch a JSON config file: backup → modify → record."""
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return False
+    # Navigate dotted key
+    parts = key.split(".")
+    target = data
+    for p in parts[:-1]:
+        if not isinstance(target, dict):
+            return False
+        target = target.setdefault(p, {})
+    if not isinstance(target, dict):
+        return False
+    old_val = target.get(parts[-1])
+    if old_val == value:
+        _g(f"{path.name}: {key} = {value} ({t('已经是目标值', 'already at target value')})")
+        return False
+    backup_path = _backup_file(path)
+    target[parts[-1]] = value
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        return False
+    changed = {str(path): str(backup_path)} if backup_path else {}
+    _record_hardening_action(measure_id, changed)
+    _g(f"{path.name}: {key}: {old_val} → {value}")
+    return True
+
+
+def _fix_session_retention():
+    """H003: Set sessionRetentionDays to 7 in all config files."""
+    fixed = 0
+    for cfg in _find_config_files():
+        try:
+            data = json.loads(cfg.read_text())
+        except Exception:
+            continue
+        val = data.get("sessionRetentionDays")
+        if isinstance(val, int) and val > 7:
+            if _patch_json_config(cfg, "sessionRetentionDays", 7, "H003"):
+                fixed += 1
+    if fixed:
+        return True
+    _g(t("未找到需要修改的配置文件。", "No config files needed modification."))
+    return False
+
+
+def _fix_prompt_baseline():
+    """H007: Create SHA-256 baseline for SOUL.md / CLAUDE.md / MEMORY.md."""
+    from ..scanners import _load_hashes, _save_hashes
+    import hashlib
+
+    stored = _load_hashes()
+    updated = 0
+    candidates = []
+    for fname in ["CLAUDE.md", "SOUL.md", "MEMORY.md"]:
+        candidates.append(Path.cwd() / fname)
+        for d in [".openclaw", ".claude", ".zeroclaw"]:
+            candidates.append(Path.home() / d / fname)
+    for c in candidates:
+        if c.exists():
+            content = c.read_text(encoding="utf-8", errors="ignore")
+            h = hashlib.sha256(content.encode()).hexdigest()
+            key = str(c.resolve())
+            if stored.get(key) != h:
+                stored[key] = h
+                updated += 1
+                _g(f"{t('已更新基线', 'Baseline updated')}: {c.name}")
+    if updated:
+        _save_hashes(stored)
+        return True
+    _g(t("基线已是最新。", "Baselines are already up to date."))
+    return False
+
+
+def _fix_approval_mode():
+    """H008: Enable approvalMode in config files."""
+    fixed = 0
+    for cfg in _find_config_files():
+        try:
+            data = json.loads(cfg.read_text())
+        except Exception:
+            continue
+        val = data.get("approvalMode")
+        if val in (False, "none", "disabled", None):
+            if _patch_json_config(cfg, "approvalMode", "always", "H008"):
+                fixed += 1
+    if fixed:
+        return True
+    _g(t("未找到需要修改的配置文件。", "No config files needed modification."))
+    return False
 
 
 MEASURES: List[HardenMeasure] = [
@@ -201,8 +388,10 @@ MEASURES: List[HardenMeasure] = [
             "更早的会话历史将不再可用。",
             "Older session history will no longer be available.",
         ),
-        lambda: _guide('"sessionRetentionDays": 7, "logLevel": "warn"'),
+        _fix_session_retention,
         [],
+        auto_fixable=True,
+        guidance_only=False,
     ),
     HardenMeasure(
         "H004",
@@ -244,14 +433,10 @@ MEASURES: List[HardenMeasure] = [
             "Record a SHA-256 baseline for SOUL.md / CLAUDE.md / MEMORY.md.",
         ),
         "",
-        lambda: _guide(
-            _tr(
-                "运行 `clawlock soul --update-baseline` 保存基线。",
-                "Run `clawlock soul --update-baseline` to save a baseline.",
-            )
-        ),
+        _fix_prompt_baseline,
         [],
-        auto_fixable=False,
+        auto_fixable=True,
+        guidance_only=False,
     ),
     HardenMeasure(
         "H008",
@@ -264,8 +449,10 @@ MEASURES: List[HardenMeasure] = [
             "高风险操作会暂停等待确认。",
             "High-risk actions will pause for confirmation.",
         ),
-        lambda: _guide('"approvalMode": "always"'),
+        _fix_approval_mode,
         ["openclaw", "zeroclaw"],
+        auto_fixable=True,
+        guidance_only=False,
     ),
     HardenMeasure(
         "H009",
@@ -510,6 +697,74 @@ MEASURES: List[HardenMeasure] = [
 ]
 
 
+# ─── Finding → Measure mapping for --from-scan ──────────────────────────────
+
+# Maps finding title keywords or config keys to relevant measure IDs.
+_FINDING_TO_MEASURES: Dict[str, List[str]] = {
+    "allowedDirectories": ["H001"],
+    "allowedPaths": ["H001"],
+    "File access scope": ["H001"],
+    "文件访问范围": ["H001"],
+    "gatewayAuth": ["H002"],
+    "Gateway auth": ["H002"],
+    "Gateway 鉴权": ["H002"],
+    "auth.enabled": ["H002"],
+    "sessionRetentionDays": ["H003"],
+    "Session log retention": ["H003"],
+    "会话日志保留": ["H003"],
+    "enableBrowserControl": ["H004"],
+    "Browser control": ["H004"],
+    "浏览器控制": ["H004"],
+    "allowNetworkAccess": ["H005"],
+    "Network access": ["H005"],
+    "网络访问": ["H005"],
+    "MCP": ["H006", "H015"],
+    "prompt baseline": ["H007"],
+    "Drift": ["H007"],
+    "漂移": ["H007"],
+    "approvalMode": ["H008"],
+    "Operation approval": ["H008"],
+    "操作审批": ["H008"],
+    "Credential dir": ["H009"],
+    "Credential file": ["H009"],
+    "凭证目录": ["H009"],
+    "凭证文件": ["H009"],
+    "rateLimit": ["H010"],
+    "Rate limit": ["H010"],
+    "速率限制": ["H010"],
+    "curl|": ["H011"],
+    "wget|": ["H011"],
+    "Download-and-execute": ["H011"],
+    "下载即执行": ["H011"],
+    "LOLBin": ["H012"],
+    "persistence": ["H013"],
+    "持久化": ["H013"],
+    "Cron": ["H013"],
+    "schtasks": ["H013"],
+    "LaunchAgent": ["H013"],
+    "systemd": ["H013"],
+    "Termux": ["H013"],
+    "tunnel": ["H014"],
+    "隧道": ["H014"],
+    "ngrok": ["H014"],
+    "dynamic module": ["H016"],
+    "动态模块": ["H016"],
+}
+
+
+def _measures_for_findings(findings: list) -> set:
+    """Given a list of finding dicts (from scan history), return relevant measure IDs."""
+    relevant = set()
+    for f in findings:
+        title = f.get("title", "")
+        location = f.get("location", "")
+        text = f"{title} {location}"
+        for keyword, measure_ids in _FINDING_TO_MEASURES.items():
+            if keyword in text:
+                relevant.update(measure_ids)
+    return relevant
+
+
 def _needs_confirmation(measure: HardenMeasure) -> bool:
     return bool(_text(measure.ux_impact))
 
@@ -533,7 +788,13 @@ def _print_measure(measure: HardenMeasure):
     console.print(f"  {t('动作', 'Action')}: {_measure_action(measure)}")
 
 
-def run_hardening(adapter_name: str, auto: bool = False, auto_fix: bool = False):
+def run_hardening(
+    adapter_name: str,
+    auto: bool = False,
+    auto_fix: bool = False,
+    from_scan: Optional[list] = None,
+    verify: bool = False,
+):
     mode = (
         t("自动修复", "auto-fix")
         if auto_fix
@@ -557,6 +818,20 @@ def run_hardening(adapter_name: str, auto: bool = False, auto_fix: bool = False)
         for m in MEASURES
         if (not m.adapters or adapter_name in m.adapters) and _platform_matches(m)
     ]
+    # If --from-scan, filter to only measures relevant to actual findings
+    if from_scan is not None:
+        relevant_ids = _measures_for_findings(from_scan)
+        if relevant_ids:
+            applicable = [m for m in applicable if m.id in relevant_ids]
+            console.print(
+                f"[dim]{t('根据扫描结果筛选了', 'Filtered to')} {len(applicable)} "
+                f"{t('条相关加固措施', 'relevant measures based on scan findings')}[/dim]\n"
+            )
+        else:
+            console.print(
+                f"[green]{t('扫描未发现与加固措施关联的问题。', 'Scan found no issues linked to hardening measures.')}[/green]"
+            )
+            return
     safe_now = [m for m in applicable if not m.guidance_only and not _needs_confirmation(m)]
     recommended_only = [
         m for m in applicable if m.guidance_only and not _needs_confirmation(m)
@@ -655,3 +930,34 @@ def run_hardening(adapter_name: str, auto: bool = False, auto_fix: bool = False)
         f"{recommended} {t('项仅建议', 'recommended')}, "
         f"{skipped} {t('项已跳过', 'skipped')}."
     )
+
+    # Post-fix verification: re-scan config + credentials to show improvement
+    if verify and applied > 0:
+        console.print()
+        console.print(f"[bold]{t('修复验证', 'Post-fix Verification')}[/bold]")
+        try:
+            from ..adapters import get_adapter
+            from ..scanners import scan_config, scan_credential_dirs
+
+            adapter = get_adapter(adapter_name)
+            cfg_findings, _ = scan_config(adapter)
+            cred_findings = scan_credential_dirs(adapter)
+            remaining = [
+                f for f in cfg_findings + cred_findings
+                if f.level in ("critical", "high")
+            ]
+            if remaining:
+                console.print(
+                    f"  [yellow]{t('仍有', 'Still')} {len(remaining)} "
+                    f"{t('个高危/严重问题待处理', 'critical/high issue(s) remaining')}[/yellow]"
+                )
+                for rf in remaining[:5]:
+                    console.print(f"    [{rf.level}] {rf.title}")
+            else:
+                console.print(
+                    f"  [green]{t('配置和凭证扫描未发现高危/严重问题。', 'Config and credential scan found no critical/high issues.')}[/green]"
+                )
+        except Exception:
+            console.print(
+                f"  [dim]{t('验证扫描跳过。', 'Verification scan skipped.')}[/dim]"
+            )

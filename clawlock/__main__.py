@@ -1,4 +1,4 @@
-"""ClawLock v2.2.2 CLI - 12 commands."""
+"""ClawLock v2.3.0 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -23,7 +23,7 @@ from rich.progress import (
 
 from . import __version__
 from .adapters import get_adapter, get_claw_version, resolve_cve_lookup
-from .hardening import run_hardening
+from .hardening import run_hardening, rollback_last
 from .i18n import t
 from .reporters import console, render_focus_report, render_scan_report
 from .scanners import (
@@ -169,8 +169,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.2.2 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.2.2 - security scan and hardening for Claw platforms",
+        "ClawLock v2.3.0 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.3.0 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -589,9 +589,48 @@ def harden(
             "--auto-fix", help=t("自动应用安全修复，例如文件权限", "Auto-apply safe fixes such as file permissions")
         ),
     ] = False,
+    from_scan: Annotated[
+        bool,
+        typer.Option(
+            "--from-scan", help=t("仅展示与最近扫描发现相关的加固措施", "Show only measures relevant to the latest scan findings")
+        ),
+    ] = False,
+    verify: Annotated[
+        bool,
+        typer.Option(
+            "--verify", help=t("修复后自动验证", "Run verification scan after fixes")
+        ),
+    ] = False,
+    do_rollback: Annotated[
+        bool,
+        typer.Option(
+            "--rollback", help=t("回滚上一次自动修复", "Rollback the last auto-fix action")
+        ),
+    ] = False,
 ):
     """Run the interactive hardening wizard."""
-    run_hardening(get_adapter(adapter).name, auto=auto, auto_fix=auto_fix)
+    if do_rollback:
+        n = rollback_last(1)
+        if n:
+            console.print(f"[green]{t('已还原', 'Restored')} {n} {t('个文件', 'file(s)')}[/green]")
+        else:
+            console.print(f"[yellow]{t('没有可回滚的操作。', 'No actions to rollback.')}[/yellow]")
+        return
+    scan_findings = None
+    if from_scan:
+        from .utils import get_scan_history
+        history = get_scan_history(1)
+        if history and "findings" in history[-1]:
+            scan_findings = history[-1]["findings"]
+        else:
+            scan_findings = []
+    run_hardening(
+        get_adapter(adapter).name,
+        auto=auto,
+        auto_fix=auto_fix,
+        from_scan=scan_findings if from_scan else None,
+        verify=verify,
+    )
 
 
 @app.command(help=t("运行 promptfoo 红队测试", "Run promptfoo red-team tests."))

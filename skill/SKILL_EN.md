@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.2.2"
+    version: "2.3.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -339,35 +339,121 @@ clawlock precheck ./new-skill/SKILL.md
 ## Feature 4: Hardening Wizard
 
 ```bash
-clawlock harden              # Interactive
-clawlock harden --auto       # Apply safe actions + print manual guidance
-clawlock harden --auto-fix   # Auto-fix real safe local changes
+clawlock harden                          # Interactive
+clawlock harden --auto                   # Apply safe actions + print manual guidance
+clawlock harden --auto-fix               # Auto-fix real safe local changes
+clawlock harden --from-scan --auto-fix   # Only act on findings from the last scan
+clawlock harden --verify                 # Re-check after hardening, produce diff report
+clawlock harden --rollback               # Restore the most recent hardening action from backup
 ```
 
-| ID | Measure | UX Impact | Confirm | Auto-fix |
-|----|---------|-----------|---------|---------|
-| H001 | Restrict file access to workspace | ⚠️ Cross-dir skills break | Yes | No |
-| H002 | Enable Gateway auth | ⚠️ External tools need token | Yes | No |
-| H003 | Shorten session retention | ⚠️ History unavailable | Yes | No |
-| H004 | Disable browser control | ⚠️ Browser-dependent skills stop | Yes | No |
-| H005 | Configure network allowlist | None | No | No |
-| H006 | Audit MCP config | Guidance only | No | No |
-| H007 | Establish drift baseline | None | No | No |
-| H008 | Enable approval mode | ⚠️ Each dangerous op needs confirm | Yes | No |
-| H009 | Tighten credential dir perms | None | No | ✅ Yes |
-| H010 | Configure rate limiting | None | No | No |
-| H011 | Block download-and-execute / runtime remote installs | ⚠️ Bootstrap scripts may stop | Yes | No |
-| H012 | Deny Windows LOLBins / script hosts | ⚠️ Windows admin scripts may stop | Yes | No |
-| H013 | Remove persistence footholds | ⚠️ Background jobs may stop | Yes | No |
-| H014 | Block tunnels / reverse proxies | ⚠️ Remote debug tunnels may stop | Yes | No |
-| H015 | Tighten MCP auth / bind / CORS | ⚠️ External MCP tools may need reconfig | Yes | No |
-| H016 | Disable user-controlled dynamic module loading | ⚠️ Hot-loaded plugins may stop | Yes | No |
-| H017 | Redact prompts and credentials from logs | ⚠️ Debug logs become less verbose | Yes | No |
-| H018 | Clean unsafe prompt / skill instructions | ⚠️ Unsafe automation wording may stop | Yes | No |
+| ID | Measure | UX Impact | Confirm | Auto-fix | LLM-assisted |
+|----|---------|-----------|---------|---------|--------------|
+| H001 | Restrict file access to workspace | ⚠️ Cross-dir skills break | Yes | No | ✅ |
+| H002 | Enable Gateway auth | ⚠️ External tools need token | Yes | No | ✅ |
+| H003 | Shorten session retention | ⚠️ History unavailable | Yes | ✅ Yes | — |
+| H004 | Disable browser control | ⚠️ Browser-dependent skills stop | Yes | No | ✅ |
+| H005 | Configure network allowlist | None | No | No | ✅ |
+| H006 | Audit MCP config | Guidance only | No | No | ⚠️ Assist review |
+| H007 | Establish drift baseline | None | No | ✅ Yes | — |
+| H008 | Enable approval mode | ⚠️ Each dangerous op needs confirm | Yes | ✅ Yes | — |
+| H009 | Tighten credential dir perms | None | No | ✅ Yes | — |
+| H010 | Configure rate limiting | None | No | No | ✅ |
+| H011 | Block download-and-execute / runtime remote installs | ⚠️ Bootstrap scripts may stop | Yes | No | ⚠️ Assist review |
+| H012 | Deny Windows LOLBins / script hosts | ⚠️ Windows admin scripts may stop | Yes | No | ⚠️ Assist review |
+| H013 | Remove persistence footholds | ⚠️ Background jobs may stop | Yes | No | ⚠️ Assist review |
+| H014 | Block tunnels / reverse proxies | ⚠️ Remote debug tunnels may stop | Yes | No | ⚠️ Assist review |
+| H015 | Tighten MCP auth / bind / CORS | ⚠️ External MCP tools may need reconfig | Yes | No | ✅ |
+| H016 | Disable user-controlled dynamic module loading | ⚠️ Hot-loaded plugins may stop | Yes | No | ⚠️ Assist review |
+| H017 | Redact prompts and credentials from logs | ⚠️ Debug logs become less verbose | Yes | No | ✅ |
+| H018 | Clean unsafe prompt / skill instructions | ⚠️ Unsafe automation wording may stop | Yes | No | ✅ |
 
 **Rule: Measures requiring confirmation must display the UX impact in yellow, then wait for explicit `y`. Default is No.**
 
-**Execution note:** The wizard groups measures into **Safe to apply now**, **Recommended only**, and **Needs confirmation**. At present, only `H009` performs an actual local auto-fix. The other measures are guided hardening recommendations and should not be described as "applied" unless a real change happened.
+**Execution note:** The wizard now groups measures into **Directly auto-fixable**, **LLM-assisted**, and **Guidance only**. `H003` / `H007` / `H008` / `H009` perform real local auto-fixes (originals are backed up to `~/.clawlock/backups/<timestamp>/` and recorded in `~/.clawlock/hardening_log.json`, revertible via `clawlock harden --rollback`). Other measures are guided hardening recommendations and should not be described as "applied" unless a real change happened.
+
+### LLM-Assisted Hardening Workflow
+
+For any measure above where `Auto-fix = No`, the Claw LLM may use its native file-editing capability to complete the remaining hardening. Execute these five steps in order, **do not skip any step**:
+
+**Step 1 — Collect structured findings**
+
+```bash
+clawlock scan --format json
+```
+
+Filter the output `findings` array to `level ∈ {critical, high, medium}`; keep `title` / `location` / `detail` as the basis for each fix.
+
+**Step 2 — Run CLI auto-fix first**
+
+```bash
+clawlock harden --from-scan --auto-fix
+```
+
+This step consumes Step 1's findings and only runs `H003` / `H007` / `H008` / `H009` auto-fixes for matching hits, producing backups and logs. **Always run this before LLM takes over**, so the LLM does not duplicate work the CLI already handles.
+
+**Step 3 — LLM locates the config per finding**
+
+For each remaining guidance-only finding, use the `location` field to locate the target file. Common targets:
+
+- `~/.openclaw/config.*` · `~/.zeroclaw/config.*` · `~/.claude/settings.json`
+- MCP server JSON (commonly at `~/.claude/mcp_servers.json` or project-level `.mcp.json`)
+- Skill scripts / SKILL.md / SOUL.md
+
+**Always Read before writing, never write blind.** If the file is absent or not writable, skip and explain why.
+
+**Step 4 — Show "current → target + UX impact" and wait for confirmation**
+
+Present each proposed change to the user in this format, **default No**:
+
+```md
+- File: {path}
+- Current: {current_value}
+- Target: {target_value}
+- Basis: {finding title} ({finding level})
+- UX impact: {from the table above}
+- Apply? (y/N)
+```
+
+Apply one item per explicit `y`. Batch `y` requires an explicit user statement covering the batch.
+
+**Step 5 — Apply and verify**
+
+After applying, run:
+
+```bash
+clawlock harden --verify
+```
+
+`--verify` re-runs `scan_config` + `scan_credential_dirs`, compares the critical / high counts before and after, and produces a diff report. If remaining risk did not drop, explain why (common causes: file not flushed / wrong path / misspelled field name). **Never omit Step 5.**
+
+### Safety Constraints for LLM-Assisted Hardening
+
+- **Always back up:** Before writing, copy the original file to `~/.clawlock/backups/<timestamp>/` and append an entry (measure_id / files_changed / backup_path) to `~/.clawlock/hardening_log.json`, so `clawlock harden --rollback` can revert via a single entry point
+- **No privilege escalation:** Never use `sudo` / `chmod -R 777` / cross-user writes / system-service installs / disabling SELinux or AppArmor
+- **Minimum necessary changes:** Do not opportunistically reformat or "improve" unrelated config; preserve original comments, field order, and indentation
+- **Do not fabricate "applied":** If an item needs a manual step (disable a Windows service, remove a cron job, uninstall a malicious skill), record it as "recommend manual action, command: …" — never as completed
+- **Credentials never in logs:** Any token / secret the LLM fills in must reference an env var or secret-manager placeholder (e.g., `${GATEWAY_TOKEN}`); never write real values into config or conversation
+- **Cross-platform refusal:** When a target path does not exist on the current OS or permissions are insufficient, skip the item with a clear message — do not create new files in unrelated directories
+- **Trust boundary:** Act only on `clawlock scan` findings; do not expand scope unilaterally or edit files that findings do not cover
+
+### Per-Measure LLM Action Map
+
+| Measure | What the LLM should do |
+|---------|----------------------|
+| H001 | Edit Claw config `allowedDirectories`: replace `/` or `~` with the absolute workspace path |
+| H002 | Set `gatewayAuth: true`, ask the user for a token env-var **name** (not the value) |
+| H004 | Set `enableBrowserControl: false`; if browser-dependent skills exist, warn the user they will stop working |
+| H005 | For `allowNetworkAccess: true`, add an explicit `allowedDomains` list (user confirms each entry) |
+| H006 | Walk the 10 MCP risk signals from Feature 1 Step 6, show diffs, let the user decide |
+| H010 | Add `rateLimit: { enabled: true, requestsPerMinute: 60 }` to Claw config |
+| H011–H014 | Help the user review skill / script / cron / launchctl / Scheduled Tasks entries for suspicious persistence or tunneling commands; list them for user confirmation before removal (never auto-delete) |
+| H015 | Edit MCP server JSON: set `host` to `127.0.0.1`, enable auth, restrict CORS `origin` |
+| H016 | Grep skill code for `import(user_input)` / `importlib.import_module(user_input)` / `require(user_input)` and guide tightening |
+| H017 | Enable redaction in logging / prompt config, or mask sensitive fields |
+| H018 | At the line numbers reported by `scan_skill`, rewrite unsafe phrasing (e.g., strip "bypass confirmation", "skip audit") into compliant equivalents |
+
+Measures not in this table are **guidance only** — the LLM must not attempt automatic rewrites.
 
 ---
 

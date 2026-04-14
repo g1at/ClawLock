@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.2.2 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.3.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -45,7 +45,7 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
         (
             "allowedDirectories",
             lambda v: isinstance(v, list) and "/" in v,
-            WARN,
+            HIGH,
             t("文件访问范围包含根目录", "File access scope includes root directory"),
             t("skill 可读写系统任意文件。", "Skills can read/write any file on the system."),
             t("收紧到项目目录。", "Restrict to the project directory."),
@@ -87,7 +87,7 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
         (
             "filesystem.allowedPaths",
             lambda v: isinstance(v, list) and any((p in ("/", "~") for p in v)),
-            WARN,
+            HIGH,
             t("文件访问范围过宽", "File access scope too broad"),
             t("allowedPaths 包含根路径。", "allowedPaths includes root path."),
             t("限制到项目路径。", "Restrict to the project path."),
@@ -139,7 +139,7 @@ _CONFIG_RULES: Dict[str, List[tuple]] = {
     ],
 }
 SECRET_PATTERNS = [
-    ("sk-[A-Za-z0-9]{20,}", "OpenAI API Key"),
+    ("sk-(?!ant-)[A-Za-z0-9]{20,}", "OpenAI API Key"),
     ("ghp_[A-Za-z0-9]{36}", "GitHub PAT"),
     ("github_pat_[A-Za-z0-9_]{20,}", "GitHub fine-grained PAT"),
     ("gh(?:o|u)_[A-Za-z0-9]{20,}", "GitHub OAuth/User Token"),
@@ -151,6 +151,7 @@ SECRET_PATTERNS = [
     ("-----BEGIN (RSA |EC )?PRIVATE KEY-----", "Private Key"),
     ("sk-ant-[A-Za-z0-9\\-]{20,}", "Anthropic API Key"),
 ]
+_COMPILED_SECRET_PATTERNS = [(re.compile(p), label) for p, label in SECRET_PATTERNS]
 RISKY_ENV_VARS = [
     "NODE_OPTIONS",
     "LD_PRELOAD",
@@ -162,7 +163,6 @@ RISKY_ENV_VARS = [
     "RUBYOPT",
     "NODE_PATH",
     "ELECTRON_RUN_AS_NODE",
-    "BROWSER",
 ]
 
 
@@ -184,8 +184,8 @@ def _check_secrets(obj: Any, path: str) -> List[Finding]:
         for i, item in enumerate(obj):
             findings.extend(_check_secrets(item, f"{path}[{i}]"))
     elif isinstance(obj, str):
-        for pat, label in SECRET_PATTERNS:
-            if re.search(pat, obj):
+        for compiled_pat, label in _COMPILED_SECRET_PATTERNS:
+            if compiled_pat.search(obj):
                 findings.append(
                     Finding(
                         "config",
@@ -629,7 +629,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "(?i)(?:chmod\\s+(?:777|a\\+rwx)\\s+|\\bicacls\\b[^\\n]{0,80}/grant\\b[^\\n]{0,40}(?:Everyone|\\*S-1-1-0))",
-        CRIT,
+        HIGH,
         t("危险权限变更", "Dangerous permission change"),
         t("chmod 777 或 icacls /grant Everyone 将文件设为全局可访问。", "chmod 777 or icacls /grant Everyone makes files world-accessible."),
     ),
@@ -669,17 +669,12 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("疑似硬编码凭证", "Suspected hardcoded credential"),
         t("代码中存在凭证字符串。", "Credential string found in code."),
     ),
+    # Credential token patterns reuse SECRET_PATTERNS as single source of truth.
     (
-        "(?i)(?:ANTHROPIC_API_KEY|OPENAI_API_KEY|sk-[A-Za-z0-9]{32,}|sk-ant-[A-Za-z0-9\\-]{20,})",
+        "|".join(f"(?:{pat})" for pat, _ in SECRET_PATTERNS),
         HIGH,
-        t("疑似 AI API 密钥", "Suspected AI API key"),
-        t("发现 API key 格式字符串。", "API key format string detected."),
-    ),
-    (
-        "(?i)(?:github_pat_[A-Za-z0-9_]{20,}|gh(?:o|u)_[A-Za-z0-9]{20,}|tp-[A-Za-z0-9._-]{16,}|AIza[0-9A-Za-z\\-_]{35}|xoxp-[0-9A-Za-z-]{10,}|_authToken\\s*=\\s*[A-Za-z0-9._-]{20,})",
-        HIGH,
-        t("疑似平台访问令牌", "Suspected platform access token"),
-        t("发现 GitHub / Google / Slack / npm / Xiaomi MiMo Token Plan 等平台访问令牌格式字符串。", "Detected a token-like string for GitHub, Google, Slack, npm, Xiaomi MiMo Token Plan, or another platform."),
+        t("疑似凭证/令牌", "Suspected credential or token"),
+        t("发现与已知凭证格式匹配的字符串。", "String matching a known credential format was found."),
     ),
     (
         "(?i)(?:export|setenv|ENV)\\s+(?:NODE_OPTIONS|LD_PRELOAD|DYLD_INSERT_LIBRARIES)\\s*=",
@@ -741,11 +736,11 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("Windows LOLBin 执行链", "Windows LOLBin execution chain"),
         t("检测到常见 Windows LOLBin（系统自带执行器）调用。", "Detected use of common Windows LOLBins (built-in execution helpers)."),
     ),
-    ("\\beval\\s*\\(", WARN, t("使用 eval()", "eval() usage"), t("动态代码执行。", "Dynamic code execution.")),
-    ("\\bexec\\s*\\(", WARN, t("使用 exec()", "exec() usage"), t("exec() 执行任意代码。", "exec() executes arbitrary code.")),
+    ("\\beval\\s*\\(", INFO, t("使用 eval()", "eval() usage"), t("动态代码执行。", "Dynamic code execution.")),
+    ("\\bexec\\s*\\(", INFO, t("使用 exec()", "exec() usage"), t("exec() 执行任意代码。", "exec() executes arbitrary code.")),
     (
         "^(?!\\s*#)\\s*\\bsubprocess\\.(?:Popen|call|run|check_output)\\s*\\(",
-        WARN,
+        INFO,
         t("调用子进程", "Subprocess invocation"),
         t("执行系统子进程。", "System subprocess execution."),
     ),
@@ -763,13 +758,13 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "(?i)open\\([\"\\'](?:/etc/passwd|/etc/shadow|~[/\\\\]\\.ssh[/\\\\]|~[/\\\\]\\.aws[/\\\\]credentials|[A-Za-z]:[/\\\\].*System32[/\\\\]config[/\\\\](?:SAM|SYSTEM|SECURITY))",
-        WARN,
+        HIGH,
         t("访问系统敏感文件", "Accessing sensitive system file"),
         t("读取敏感系统文件。", "Reading sensitive system file."),
     ),
     (
         "(?i)(?:requests|httpx|urllib|aiohttp)\\.(?:get|post|put|delete)\\s*\\(",
-        WARN,
+        INFO,
         t("外部网络请求", "External network request"),
         t("发起 HTTP 请求，确认目标是否可控。", "HTTP request made; verify target is not user-controlled."),
     ),
@@ -860,7 +855,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "(?i)(?:fetch|axios|request)\\s*\\([\"\\']https?://(?!localhost|127\\.)",
-        WARN,
+        INFO,
         t("向外部 URL 发送请求", "Request to external URL"),
         t("向非本地 URL 发起请求。", "Request to non-local URL."),
     ),
@@ -872,7 +867,7 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "(?i)\\b(?:npx|uvx|pipx\\s+run|npm\\s+exec)\\b|\\bpip\\s+install\\s+git\\+https?://",
-        WARN,
+        INFO,
         t("运行时拉取外部依赖", "Runtime external dependency fetch"),
         t("运行时通过远程源拉取并执行外部依赖，存在供应链风险。", "Fetches and executes external dependencies at runtime, creating supply-chain risk."),
     ),
@@ -888,7 +883,49 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("配置了外部 Webhook", "External webhook configured"),
         t("数据可能通过 webhook 外传。", "Data may be exfiltrated via webhook."),
     ),
+    (
+        "(?i)\\bos\\.system\\s*\\(",
+        INFO,
+        t("调用 os.system()", "os.system() invocation"),
+        t("通过 os.system 执行 shell 命令。", "Shell command executed via os.system."),
+    ),
+    (
+        "(?i)\\b(?:child_process\\.(?:exec|execSync|spawn|spawnSync|execFile|fork)|\\brequire\\s*\\([\"\\']child_process[\"\\']\\))",
+        INFO,
+        t("调用 Node child_process", "Node child_process invocation"),
+        t("通过 child_process 执行系统命令。", "System command executed via child_process."),
+    ),
+    (
+        "(?i)powershell(?:\\.exe)?\\s+[^\\n]*-(?:EncodedCommand|enc|ec)\\b",
+        HIGH,
+        t("PowerShell 编码命令", "PowerShell encoded command"),
+        t("使用 -EncodedCommand 执行 base64 编码的 PowerShell 命令，常用于混淆。", "Executes base64-encoded PowerShell via -EncodedCommand, commonly used for obfuscation."),
+    ),
+    (
+        "(?i)\\breg(?:\\.exe)?\\s+add\\b",
+        HIGH,
+        t("写入 Windows 注册表", "Windows registry write"),
+        t("通过 reg add 写入注册表，可能用于持久化或配置篡改。", "Writes to registry via reg add; may be used for persistence or config tampering."),
+    ),
+    (
+        "(?:chr\\s*\\(\\s*\\d+\\s*\\)\\s*[+.]?\\s*){5,}",
+        WARN,
+        t("chr() 字符拼接（疑似混淆）", "chr() character concatenation (suspected obfuscation)"),
+        t("使用多次 chr() 调用拼接字符串，可能隐藏恶意指令。", "Multiple chr() calls concatenating a string may hide malicious instructions."),
+    ),
 ]
+_COMPILED_MALICIOUS_PATTERNS = [
+    (re.compile(p), level, title, detail)
+    for p, level, title, detail in MALICIOUS_PATTERNS
+]
+
+
+_COMMENT_RE = re.compile(r"^\s*(?:#|//|/?\*|<!--)")
+
+
+def _is_comment_line(line: str) -> bool:
+    """Return True if the line looks like a code comment."""
+    return bool(_COMMENT_RE.match(line))
 
 
 def scan_skill(skill_path: Path) -> List[Finding]:
@@ -927,10 +964,14 @@ def scan_skill(skill_path: Path) -> List[Finding]:
             unwrapped = _unwrap_shell_commands(line)
             candidates.extend(unwrapped)
             is_deobfuscated = False
+            is_comment = _is_comment_line(line)
             for candidate in candidates:
-                for pattern, level, title, detail in MALICIOUS_PATTERNS:
-                    if re.search(pattern, candidate):
-                        key = f"{pattern}:{f}:{i}"
+                for compiled_pat, level, title, detail in _COMPILED_MALICIOUS_PATTERNS:
+                    # Skip non-CRIT patterns on comment lines to reduce false positives
+                    if is_comment and level != CRIT:
+                        continue
+                    if compiled_pat.search(candidate):
+                        key = f"{compiled_pat.pattern}:{f}:{i}"
                         if key in seen:
                             continue
                         seen.add(key)
@@ -1018,7 +1059,7 @@ SOUL_INJECTION_PATTERNS: List[Tuple[str, str, str]] = [
         t("越狱关键词", "Jailbreak keywords"),
     ),
     ("(?:\\\\u[0-9a-fA-F]{4}){6,}", HIGH, t("大量 Unicode 转义", "Excessive Unicode escapes")),
-    ("(?:[A-Za-z0-9+/]{60,}={0,2})", WARN, t("长 base64 字符串", "Long base64 string")),
+    ("(?:[A-Za-z0-9+/]{200,}={0,2})", WARN, t("长 base64 字符串", "Long base64 string")),
     (
         "(?i)do\\s+not\\s+(?:reveal|disclose|share)\\s+(?:your\\s+)?(?:system\\s+prompt|instructions)",
         WARN,
@@ -1039,6 +1080,10 @@ SOUL_INJECTION_PATTERNS: List[Tuple[str, str, str]] = [
         WARN,
         t("优先工具调用指令", "Tool-first instruction"),
     ),
+]
+_COMPILED_SOUL_PATTERNS = [
+    (re.compile(p), level, title)
+    for p, level, title in SOUL_INJECTION_PATTERNS
 ]
 HASH_STORE = Path.home() / ".clawlock" / "drift_hashes.json"
 _HASH_CACHE: dict | None = None
@@ -1091,8 +1136,8 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
         return findings
     content = filepath.read_text(encoding="utf-8", errors="ignore")
     for i, line in enumerate(content.splitlines(), 1):
-        for pattern, level, title in SOUL_INJECTION_PATTERNS:
-            if re.search(pattern, line):
+        for compiled_pat, level, title in _COMPILED_SOUL_PATTERNS:
+            if compiled_pat.search(line):
                 findings.append(
                     Finding(
                         "soul",
@@ -1218,6 +1263,10 @@ _MCP_ITP = [
         t("工具描述要求模型在回复前优先执行工具调用。", "Tool description instructs the model to invoke a tool before replying."),
     ),
 ]
+_COMPILED_MCP_ITP = [
+    (re.compile(p), lv, title, detail)
+    for p, lv, title, detail in _MCP_ITP
+]
 
 
 def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Finding]:
@@ -1312,8 +1361,8 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                 for fn, text in text_fields.items():
                     if not text:
                         continue
-                    for pat, lv, title, detail in _MCP_ITP:
-                        if re.search(pat, text, re.MULTILINE):
+                    for compiled_pat, lv, title, detail in _COMPILED_MCP_ITP:
+                        if compiled_pat.search(text):
                             findings.append(
                                 Finding(
                                     "mcp_itp",
@@ -1344,8 +1393,8 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         candidates = [line]
         candidates.extend(_unwrap_shell_commands(line))
         for candidate in candidates:
-            for pattern, level, title, detail in MALICIOUS_PATTERNS:
-                if re.search(pattern, candidate):
+            for compiled_pat, level, title, detail in _COMPILED_MALICIOUS_PATTERNS:
+                if compiled_pat.search(candidate):
                     suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
                     findings.append(
                         Finding(

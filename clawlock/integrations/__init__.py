@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.2.2 integrations — cloud intelligence,
+ClawLock v2.3.0 integrations — cloud intelligence,
 external scanner, and Agent-Scan.
 """
 

@@ -741,7 +741,6 @@ def scan_agent(
     if enable_llm:
         layers_used.append(t("LLM 评估", "LLM Assessment"))
 
-    _none = t("无", "None")
     unique.insert(
         0,
         Finding(

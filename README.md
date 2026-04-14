@@ -38,6 +38,9 @@ clawlock skill /path/to/skill            # Audit one skill
 clawlock soul                            # Check prompt + memory drift
 clawlock harden                          # Interactive hardening wizard
 clawlock harden --auto-fix               # Apply safe local auto-fixes
+clawlock harden --from-scan --auto-fix   # Fix only issues found in last scan
+clawlock harden --auto-fix --verify      # Auto-fix then verify the result
+clawlock harden --rollback               # Undo the last auto-fix
 clawlock mcp-scan ./mcp-server/src       # MCP source-code deep scan
 clawlock agent-scan --code ./agent/src   # Standalone OWASP ASI agent scan
 clawlock scan --format html -o report.html
@@ -201,12 +204,24 @@ ClawLock currently ships **18 hardening measures**.
 - `clawlock harden`: interactive mode
 - `clawlock harden --auto`: applies safe non-interactive actions and prints guidance for recommendation-only items
 - `clawlock harden --auto-fix`: only performs real safe local auto-fixes
+- `clawlock harden --from-scan`: show only measures relevant to the latest scan findings
+- `clawlock harden --auto-fix --verify`: auto-fix then re-scan to confirm the fix worked
+- `clawlock harden --rollback`: undo the last auto-fix action (restores from backup)
 
-Important current behavior:
+Auto-fixable measures:
+
+| ID | Measure | What it does |
+|----|---------|--------------|
+| H003 | Shorten session retention | Sets `sessionRetentionDays` to 7 in config files |
+| H007 | Create prompt baseline | Records SHA-256 baselines for SOUL.md / CLAUDE.md / MEMORY.md |
+| H008 | Enable approval mode | Sets `approvalMode` to `"always"` in config files |
+| H009 | Tighten credential permissions | `chmod 600`/`700` or `icacls` on config dirs and credential files |
+
+All config modifications are backed up to `~/.clawlock/backups/` before changes are made.
+
+Other behavior:
 
 - The wizard groups measures into **Safe to apply now**, **Recommended only**, and **Needs confirmation**
-- Only **`H009`** performs an actual local auto-fix today
-- `H009` tightens permissions on supported config directories and common home credential files such as `.npmrc`, `.pypirc`, and `.netrc`
 - UX-impacting measures still require explicit confirmation in interactive mode
 - Guidance-only measures are no longer reported as if they were applied
 
@@ -253,7 +268,7 @@ cp skill/SKILL.md ~/.openclaw/skills/clawlock/
 git clone https://github.com/g1at/clawlock.git
 cd clawlock
 pip install -e ".[dev]"
-pytest tests/test_clawlock.py -v    # 104 tests
+pytest tests/test_clawlock.py -v    # 110 tests
 ```
 
 ## Contributing

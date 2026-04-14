@@ -229,9 +229,6 @@ def find_all_binaries(names: List[str]) -> Dict[str, Optional[str]]:
     return {name: shutil.which(name) for name in names}
 
 
-# ─── Android / Termux specifics ─────────────────────────────────────────────
-
-
 # ─── Device fingerprint (privacy-preserving) ────────────────────────────────
 
 
@@ -300,23 +297,29 @@ def _save_history(records: list):
 
 
 def record_scan(
-    adapter: str, score: int, critical: int, warning: int, findings_total: int
+    adapter: str,
+    score: int,
+    critical: int,
+    warning: int,
+    findings_total: int,
+    findings_summary: list | None = None,
 ):
     """Append a scan result to persistent history."""
     from datetime import datetime
 
     records = _load_history()
-    records.append(
-        {
-            "time": datetime.now().isoformat(),
-            "adapter": adapter,
-            "device": device_fingerprint(),
-            "score": score,
-            "critical": critical,
-            "warning": warning,
-            "total": findings_total,
-        }
-    )
+    entry = {
+        "time": datetime.now().isoformat(),
+        "adapter": adapter,
+        "device": device_fingerprint(),
+        "score": score,
+        "critical": critical,
+        "warning": warning,
+        "total": findings_total,
+    }
+    if findings_summary is not None:
+        entry["findings"] = findings_summary
+    records.append(entry)
     _save_history(records)
 
 
