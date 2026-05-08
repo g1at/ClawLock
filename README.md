@@ -99,8 +99,8 @@ ClawLock uses three report formats for different workflows:
 
 | Mode | Behavior | Best for |
 |------|----------|----------|
-| `monitor` | Report only; does not fail the run on findings | Manual review and exploratory checks |
-| `enforce` | Returns exit code `1` on critical/high findings | CI gates and automated enforcement |
+| `monitor` (default) | Report only; does not fail the run on findings | Manual review and exploratory checks |
+| `enforce` | Returns exit code `1` on critical/high findings | CI gates and automated enforcement (pass `--mode enforce`) |
 
 Examples:
 

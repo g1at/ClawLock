@@ -229,17 +229,31 @@ def _extract_version(output: str) -> Optional[str]:
     return None
 
 
+_VERSION_CACHE: Dict[str, str] = {}
+
+
 def get_claw_version(adapter: AdapterSpec) -> str:
+    """Return the detected Claw product version, cached per process.
+
+    Multiple call sites within a single ``clawlock scan`` would otherwise
+    each spawn a ``--version`` subprocess; the cache makes them free.
+    """
+    if adapter.name in _VERSION_CACHE:
+        return _VERSION_CACHE[adapter.name]
     if not adapter.version_cmd:
+        _VERSION_CACHE[adapter.name] = "unknown"
         return "unknown"
     binary_path = _resolve_binary_path(adapter)
     if not binary_path:
+        _VERSION_CACHE[adapter.name] = "unknown"
         return "unknown"
     for cmd in _version_commands(adapter, binary_path):
         _, out, err = run_cmd(cmd)
         version = _extract_version(out) or _extract_version(err)
         if version:
+            _VERSION_CACHE[adapter.name] = version
             return version
+    _VERSION_CACHE[adapter.name] = "unknown"
     return "unknown"
 
 

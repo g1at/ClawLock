@@ -14,12 +14,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 from ..i18n import t
-from ..scanners import CRIT, HIGH, INFO, WARN, Finding
+from ..scanners import CONFIG_RULES, CRIT, HIGH, INFO, WARN, Finding
 from .mcp_deep import scan_package_manifest_risks
 
 # =============================================================================
@@ -44,120 +44,10 @@ ASI_CATEGORIES = {
 
 
 # =============================================================================
-# Layer 1: Static config analysis
+# Layer 1: Static config analysis  — driven by the unified ``CONFIG_RULES``
+# registry in ``clawlock.scanners``. Rules with an ``asi`` tag belong to this
+# scanner; rules without one are ``scan_config``'s territory.
 # =============================================================================
-@dataclass
-class ConfigCheck:
-    asi: str
-    path: str
-    check: Any  # callable(value) -> bool means vulnerable
-    level: str
-    title_zh: str
-    detail_zh: str
-    remediation: str = ""
-
-
-_CONFIG_CHECKS: List[ConfigCheck] = [
-    ConfigCheck(
-        "ASI-01",
-        "tools.exec.security",
-        lambda v: v in (None, "allow", ""),
-        CRIT,
-        t("执行策略未限制", "Execution policy unrestricted"),
-        t("tools.exec.security 未设为 deny/allowlist，agent 可执行任意命令。", "tools.exec.security is not set to deny/allowlist; agent can execute arbitrary commands."),
-        t("设为 security: deny 或 security: allowlist。", "Set security: deny or security: allowlist."),
-    ),
-    ConfigCheck(
-        "ASI-01",
-        "tools.exec.ask",
-        lambda v: v in (None, "off", "never"),
-        HIGH,
-        t("命令执行无需审批", "Command execution requires no approval"),
-        t("tools.exec.ask 未开启，命令执行不弹审批提示。", "tools.exec.ask is not enabled; command execution does not prompt for approval."),
-        t("设为 ask: always 或 ask: on-miss。", "Set ask: always or ask: on-miss."),
-    ),
-    ConfigCheck(
-        "ASI-05",
-        "gateway.auth.token",
-        lambda v: not v,
-        CRIT,
-        t("Gateway 无认证", "Gateway has no authentication"),
-        t("未配置 gateway.auth.token/password，服务端口完全开放。", "gateway.auth.token/password not configured; service port is fully open."),
-        t("设置强随机 gateway.auth.token。", "Set a strong random gateway.auth.token."),
-    ),
-    ConfigCheck(
-        "ASI-05",
-        "gateway.bind",
-        lambda v: v and v not in ("loopback", "127.0.0.1", "localhost"),
-        HIGH,
-        t("Gateway 绑定非回环地址", "Gateway bound to non-loopback address"),
-        t("Gateway 暴露到网络，增加攻击面。", "Gateway is exposed to the network, increasing attack surface."),
-        t("设为 bind: loopback 或通过 SSH/Tailscale 隧道访问。", "Set bind: loopback or access via SSH/Tailscale tunnel."),
-    ),
-    ConfigCheck(
-        "ASI-09",
-        "allowedDirectories",
-        lambda v: isinstance(v, list) and "/" in v,
-        CRIT,
-        t("文件访问范围含根目录", "File access scope includes root directory"),
-        t("Agent 可读写系统全部文件。", "Agent can read/write all system files."),
-        t("限制到项目目录。", "Restrict to project directory."),
-    ),
-    ConfigCheck(
-        "ASI-09",
-        "tools.browser.enabled",
-        lambda v: v is True,
-        WARN,
-        t("浏览器控制已开启", "Browser control is enabled"),
-        t("Agent 可操控浏览器，带来 cookie 窃取等风险。", "Agent can control the browser, risking cookie theft and more."),
-        t("仅在需要时开启。", "Enable only when needed."),
-    ),
-    ConfigCheck(
-        "ASI-09",
-        "tools.sessions.visibility",
-        lambda v: v in (None, "all"),
-        WARN,
-        t("会话可见性过宽", "Session visibility too broad"),
-        t("会话工具可跨会话访问对话内容。", "Session tools can access conversation content across sessions."),
-        t("设为 visibility: self 或 visibility: tree。", "Set visibility: self or visibility: tree."),
-    ),
-    ConfigCheck(
-        "ASI-11",
-        "agents.defaults.sandbox.mode",
-        lambda v: v in (None, "off", ""),
-        HIGH,
-        t("沙箱模式未开启", "Sandbox mode not enabled"),
-        t("Agent 直接在宿主环境执行，无容器隔离。", "Agent runs directly on host without container isolation."),
-        t("设为 sandbox.mode: docker。", "Set sandbox.mode: docker."),
-    ),
-    ConfigCheck(
-        "ASI-11",
-        "agents.defaults.sandbox.docker.network",
-        lambda v: v and v != "none",
-        WARN,
-        t("沙箱容器有网络访问", "Sandbox container has network access"),
-        t("沙箱网络未隔离，容器可访问网络。", "Sandbox network not isolated; container can access the network."),
-        t("设为 docker.network: none。", "Set docker.network: none."),
-    ),
-    ConfigCheck(
-        "ASI-12",
-        "commands.ownerDisplay",
-        lambda v: v in (None, "visible", ""),
-        WARN,
-        t("所有者信息暴露在提示词中", "Owner information exposed in prompts"),
-        t("所有者身份可能被第三方模型提供者看到。", "Owner identity may be visible to third-party model providers."),
-        t("设为 ownerDisplay: hash 并配置 ownerDisplaySecret。", "Set ownerDisplay: hash and configure ownerDisplaySecret."),
-    ),
-    ConfigCheck(
-        "ASI-08",
-        "hooks.allowRequestSessionKey",
-        lambda v: v is True,
-        HIGH,
-        t("Hook 允许指定 sessionKey", "Hook allows specifying sessionKey"),
-        t("外部可通过 hook 定向路由消息到指定会话。", "External parties can route messages to specific sessions via hooks."),
-        t("设为 allowRequestSessionKey: false。", "Set allowRequestSessionKey: false."),
-    ),
-]
 
 
 def _get_nested(data: dict, path: str) -> Any:
@@ -173,25 +63,35 @@ def _get_nested(data: dict, path: str) -> Any:
 def scan_agent_config(config: dict) -> List[Finding]:
     """Layer 1: Static configuration analysis against ASI categories."""
     findings: List[Finding] = []
-    for check in _CONFIG_CHECKS:
-        value = _get_nested(config, check.path)
+    for rule in CONFIG_RULES:
+        if rule.asi is None:
+            continue
+        value = _get_nested(config, rule.key)
+        if value is None and not rule.check(value):
+            # ``check`` may legitimately fire on None (e.g. "approval not set"),
+            # so we only short-circuit when both value is missing AND the
+            # check rejects None.
+            continue
         try:
-            if not check.check(value):
+            if not rule.check(value):
                 continue
-            _, asi_zh = ASI_CATEGORIES.get(check.asi, (check.asi, check.asi))
-            findings.append(
-                Finding(
-                    scanner="agent_scan",
-                    level=check.level,
-                    title=f"[{check.asi}] {check.title_zh}",
-                    detail=f"{asi_zh}: {check.detail_zh}",
-                    location=f"config:{check.path}",
-                    remediation=check.remediation,
-                    metadata={"asi": check.asi},
-                )
-            )
         except Exception:
             continue
+        _, asi_zh = ASI_CATEGORIES.get(rule.asi, (rule.asi, rule.asi))
+        metadata: Dict[str, Any] = {"asi": rule.asi, "category": "ASI"}
+        if rule.measure_ids:
+            metadata["measure_ids"] = list(rule.measure_ids)
+        findings.append(
+            Finding(
+                scanner="agent_scan",
+                level=rule.level,
+                title=f"[{rule.asi}] {rule.title}",
+                detail=f"{asi_zh}: {rule.detail}",
+                location=f"config:{rule.key}",
+                remediation=rule.remediation,
+                metadata=metadata,
+            )
+        )
     return findings
 
 

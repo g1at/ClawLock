@@ -753,12 +753,23 @@ _FINDING_TO_MEASURES: Dict[str, List[str]] = {
 
 
 def _measures_for_findings(findings: list) -> set:
-    """Given a list of finding dicts (from scan history), return relevant measure IDs."""
+    """Given a list of finding dicts (from scan history), return relevant measure IDs.
+
+    Scanners can attach ``measure_ids`` to ``Finding.metadata`` and reporters
+    persist them into the history record. When present this is the
+    authoritative mapping; otherwise we fall back to the title/location
+    keyword table for findings produced by older runs or scanners that have
+    not migrated yet.
+    """
     relevant = set()
     for f in findings:
-        title = f.get("title", "")
-        location = f.get("location", "")
-        text = f"{title} {location}"
+        if not isinstance(f, dict):
+            continue
+        ids = f.get("measure_ids") or []
+        if ids:
+            relevant.update(ids)
+            continue
+        text = f"{f.get('title', '')} {f.get('location', '')}"
         for keyword, measure_ids in _FINDING_TO_MEASURES.items():
             if keyword in text:
                 relevant.update(measure_ids)
@@ -937,14 +948,14 @@ def run_hardening(
         console.print(f"[bold]{t('修复验证', 'Post-fix Verification')}[/bold]")
         try:
             from ..adapters import get_adapter
-            from ..scanners import scan_config, scan_credential_dirs
+            from ..scanners import CRIT, HIGH, scan_config, scan_credential_dirs
 
             adapter = get_adapter(adapter_name)
             cfg_findings, _ = scan_config(adapter)
             cred_findings = scan_credential_dirs(adapter)
             remaining = [
                 f for f in cfg_findings + cred_findings
-                if f.level in ("critical", "high")
+                if f.level in (CRIT, HIGH)
             ]
             if remaining:
                 console.print(
@@ -957,7 +968,14 @@ def run_hardening(
                 console.print(
                     f"  [green]{t('配置和凭证扫描未发现高危/严重问题。', 'Config and credential scan found no critical/high issues.')}[/green]"
                 )
-        except Exception:
+        except Exception as exc:
+            from ..scanners import _log_scanner_error
+
+            _log_scanner_error("post-fix verification", exc)
             console.print(
-                f"  [dim]{t('验证扫描跳过。', 'Verification scan skipped.')}[/dim]"
+                f"  [yellow]{t('验证扫描失败', 'Verification scan failed')}: "
+                f"{type(exc).__name__}: {exc}[/yellow]"
+            )
+            console.print(
+                f"  [dim]{t('详见', 'See')} ~/.clawlock/error.log[/dim]"
             )

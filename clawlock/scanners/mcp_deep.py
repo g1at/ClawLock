@@ -16,9 +16,10 @@ import ast
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..scanners import Finding, CRIT, HIGH, WARN, INFO
 from ..i18n import t
@@ -736,10 +737,146 @@ def _version_in_range(version_spec: str, min_v: str, max_v: str) -> Optional[str
     return ver if lower <= parts <= upper else None
 
 
-def scan_package_manifest_risks(code_path: Path) -> List[Finding]:
-    """Check package.json for risky dependencies and known frontend CVEs."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# Hallucinated package / slopsquat detection
+#
+# AI-generated code routinely fabricates plausible-sounding package names that
+# do not actually exist on the public registry. Attackers monitor for these
+# names and squat them with malicious payloads. We detect by querying the
+# registry for every declared dependency and flagging anything that returns
+# 404. Results are cached for 24 h so repeat scans of the same project don't
+# pound the registry.
+# ═══════════════════════════════════════════════════════════════════════════════
+_PACKAGE_CACHE_FILE = Path.home() / ".clawlock" / "cache" / "packages.json"
+_PACKAGE_CACHE_TTL_SECONDS = 24 * 60 * 60
+_PACKAGE_PROBE_TIMEOUT = 4.0
+_PACKAGE_CHECK_DISABLED_ENV = "CLAWLOCK_NO_PKG_CHECK"
+
+
+def _load_package_cache() -> Dict[str, Dict]:
+    try:
+        if _PACKAGE_CACHE_FILE.exists():
+            return json.loads(_PACKAGE_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_package_cache(cache: Dict[str, Dict]) -> None:
+    try:
+        _PACKAGE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PACKAGE_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _probe_package(ecosystem: str, name: str) -> Optional[bool]:
+    """Return True if the package exists, False if confirmed missing, None on
+    network failure / timeout (caller should treat as unknown, not fail)."""
+    if ecosystem == "npm":
+        url = f"https://registry.npmjs.org/{name}"
+    elif ecosystem == "pypi":
+        url = f"https://pypi.org/pypi/{name}/json"
+    else:
+        return None
+    try:
+        import httpx  # lazy: keep clawlock importable when offline-first
+        resp = httpx.get(
+            url,
+            timeout=_PACKAGE_PROBE_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": "clawlock-pkg-check"},
+        )
+        if resp.status_code == 200:
+            return True
+        if resp.status_code == 404:
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def check_package_exists(
+    ecosystem: str, name: str, *, cache: Optional[Dict[str, Dict]] = None
+) -> Optional[bool]:
+    """Cached registry existence probe. Returns True / False / None (unknown)."""
+    if os.environ.get(_PACKAGE_CHECK_DISABLED_ENV):
+        return None
+    cache_key = f"{ecosystem}:{name}"
+    cache_obj = cache if cache is not None else _load_package_cache()
+    entry = cache_obj.get(cache_key)
+    now = time.time()
+    if entry and now - entry.get("checked_at", 0) < _PACKAGE_CACHE_TTL_SECONDS:
+        return entry.get("exists")
+    result = _probe_package(ecosystem, name)
+    if result is not None:
+        cache_obj[cache_key] = {"exists": result, "checked_at": now}
+        if cache is None:
+            _save_package_cache(cache_obj)
+    return result
+
+
+def _parse_requirements_txt(text: str) -> List[str]:
+    names: List[str] = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        # Strip extras "[foo]" and version specifiers
+        name = re.split(r"[\[<>=!~;\s]", line, maxsplit=1)[0]
+        if name:
+            names.append(name.lower())
+    return names
+
+
+def _check_hallucinated_packages(
+    pkg_specs: List[Tuple[str, str, str, Path]],
+) -> List[Finding]:
+    """``pkg_specs`` is a list of ``(ecosystem, name, version_or_blank, source_path)``."""
+    findings: List[Finding] = []
+    if not pkg_specs:
+        return findings
+    cache = _load_package_cache()
+    for ecosystem, name, version, source in pkg_specs:
+        # Local / git / file deps cannot be probed against the registry.
+        if any(s in version for s in ("file:", "link:", "git+", "github:")):
+            continue
+        exists = check_package_exists(ecosystem, name, cache=cache)
+        if exists is False:
+            findings.append(
+                Finding(
+                    scanner="depscan",
+                    level=HIGH,
+                    title="[SUPPLY_CHAIN] " + t(
+                        f"依赖在 {ecosystem} 注册表中不存在：{name}",
+                        f"Dependency not found on {ecosystem} registry: {name}",
+                    ),
+                    detail=t(
+                        f"{ecosystem} 注册表对 {name} 返回 404。AI 生成代码常虚构包名，攻击者会抢注成恶意包（slopsquatting）。",
+                        f"{ecosystem} registry returned 404 for {name}. AI-generated code often hallucinates packages and attackers squat them with malicious payloads (slopsquatting).",
+                    ),
+                    location=str(source),
+                    snippet=f"{name}{(' @ ' + version) if version else ''}",
+                    remediation=t(
+                        "立即移除该依赖；核实真实包名后再添加。",
+                        "Remove the dependency immediately; verify the correct name before adding it back.",
+                    ),
+                    metadata={"category": "SUPPLY_CHAIN", "ecosystem": ecosystem, "package": name},
+                )
+            )
+    _save_package_cache(cache)
+    return findings
+
+
+def scan_package_manifest_risks(code_path: Path, *, check_existence: bool = True) -> List[Finding]:
+    """Check package.json / requirements.txt for risky deps, known CVEs, and
+    hallucinated package names. Set ``check_existence=False`` to skip the
+    network-backed registry probe."""
     findings = []
     pkg_files = _package_json_candidates(code_path)
+    pkg_specs: List[Tuple[str, str, str, Path]] = []
 
     _RISKY_DEPS = {
         "node-serialize": ("DESER", CRIT, t("已知不安全反序列化库", "Known insecure deserialization library")),
@@ -767,6 +904,7 @@ def scan_package_manifest_risks(code_path: Path) -> List[Finding]:
                     )
                 )
         for pkg_name, version_spec in all_deps.items():
+            pkg_specs.append(("npm", pkg_name, str(version_spec), pkg_file))
             norm = pkg_name.lower().replace("@", "").replace("/", "-")
             for component, (min_v, max_v) in _REACT2SHELL_AFFECTED.items():
                 if component not in norm:
@@ -787,4 +925,20 @@ def scan_package_manifest_risks(code_path: Path) -> List[Finding]:
                         metadata={"category": "DEPVL", "cve_id": "CVE-2025-55182"},
                     )
                 )
+
+    # Also collect Python deps from requirements*.txt files for the
+    # hallucinated-package probe.
+    if code_path.is_dir():
+        for req_file in code_path.rglob("requirements*.txt"):
+            if "node_modules" in str(req_file) or ".git" in str(req_file):
+                continue
+            try:
+                names = _parse_requirements_txt(req_file.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+            for n in names:
+                pkg_specs.append(("pypi", n, "", req_file))
+
+    if check_existence:
+        findings.extend(_check_hallucinated_packages(pkg_specs))
     return findings

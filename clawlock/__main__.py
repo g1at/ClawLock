@@ -1,4 +1,4 @@
-"""ClawLock v2.3.1 CLI - 12 commands."""
+"""ClawLock v2.4.0 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -30,7 +30,9 @@ from .scanners import (
     CRIT,
     HIGH,
     INFO,
+    WARN,
     Finding,
+    _scanner_error_finding,
     discover_installations,
     precheck_skill_md,
     scan_all_skills,
@@ -169,8 +171,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.3.1 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.3.1 - security scan and hardening for Claw platforms",
+        "ClawLock v2.4.0 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.4.0 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -231,7 +233,7 @@ BANNER = "[bold cyan]ClawLock[/bold cyan] [dim]v{ver} | github.com/g1at/clawlock
 def _tag(level: str) -> str:
     if level in (CRIT, HIGH):
         return t("高危", "HIGH")
-    if level == "medium":
+    if level == WARN:
         return t("警告", "WARN")
     return t("信息", "INFO")
 
@@ -278,7 +280,7 @@ def scan(
                 "monitor (report only; exit 0) | enforce (exit 1 on critical/high; recommended for CI)",
             ),
         ),
-    ] = "enforce",
+    ] = "monitor",
     output_format: F = "text",
     output: Annotated[
         Optional[str],
@@ -372,8 +374,8 @@ def scan(
                     label = futures[future]
                     try:
                         findings_map[label] = future.result()
-                    except Exception:
-                        findings_map[label] = []
+                    except Exception as exc:
+                        findings_map[label] = [_scanner_error_finding(label, exc)]
                     progress.update(
                         ptask,
                         advance=1,
@@ -392,8 +394,8 @@ def scan(
                 label = futures[future]
                 try:
                     findings_map[label] = future.result()
-                except Exception:
-                    findings_map[label] = []
+                except Exception as exc:
+                    findings_map[label] = [_scanner_error_finding(label, exc)]
 
     # Ensure consistent ordering in findings_map
     ordered_map = {}
@@ -691,10 +693,23 @@ def mcp_scan(
     base_url: Annotated[
         str, typer.Option("--base-url", help=t("自定义 API Base URL", "Custom API base URL"))
     ] = "",
+    no_pkg_check: Annotated[
+        bool,
+        typer.Option(
+            "--no-pkg-check",
+            help=t(
+                "跳过包名存在性检查（npm / PyPI 注册表探测）",
+                "Skip the npm / PyPI registry existence probe",
+            ),
+        ),
+    ] = False,
 ):
     """Deep-scan MCP server source code."""
     from .integrations import run_mcp_deep_scan
+    import os as _os
 
+    if no_pkg_check:
+        _os.environ["CLAWLOCK_NO_PKG_CHECK"] = "1"
     p = Path(code_path).expanduser()
     console.print(f"[cyan]{t('MCP 深度扫描', 'MCP Deep Scan')}[/cyan]  path={p}")
     findings = run_mcp_deep_scan(p, model, token, base_url)
@@ -729,11 +744,25 @@ def agent_scan(
         bool,
         typer.Option("--llm/--no-llm", help=t("启用 LLM 辅助语义分析", "Enable LLM-assisted semantic analysis")),
     ] = False,
+    no_pkg_check: Annotated[
+        bool,
+        typer.Option(
+            "--no-pkg-check",
+            help=t(
+                "跳过包名存在性检查（npm / PyPI 注册表探测）",
+                "Skip the npm / PyPI registry existence probe",
+            ),
+        ),
+    ] = False,
     adapter: A = "auto",
 ):
     """Run the OWASP ASI agent scan."""
     from .adapters import get_adapter, load_config
     from .integrations import run_agent_scan
+    import os as _os
+
+    if no_pkg_check:
+        _os.environ["CLAWLOCK_NO_PKG_CHECK"] = "1"
 
     config = None
     if config_file:
@@ -858,8 +887,8 @@ def watch(
             mem_f = scan_memory_files(spec)
             proc_f = scan_processes(spec)
             all_f = cfg_f + soul_f + mem_f + proc_f
-            crits = [f for f in all_f if f.level in ("critical", "high")]
-            warns = [f for f in all_f if f.level == "medium"]
+            crits = [f for f in all_f if f.level in (CRIT, HIGH)]
+            warns = [f for f in all_f if f.level == WARN]
             if crits:
                 console.print(
                     f"  [bold red]{len(crits)} {t('项高危变化', 'high-severity change(s) found')}[/bold red]"
