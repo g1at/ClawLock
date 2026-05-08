@@ -20,7 +20,7 @@ class TestCliEntry:
         assert result.exit_code == 0
         assert "Agent Security Enforcement" in result.stdout
         assert "██████╗██╗" in result.stdout
-        assert "v2.3.1" in result.stdout
+        assert "v2.4.0" in result.stdout
         assert "g0at" in result.stdout
 
     def test_root_help_still_shows_help(self):
@@ -39,7 +39,7 @@ class TestCliEntry:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.3.1"
+    version: "2.4.0"
     homepage: "https://github.com/g1at/ClawLock"
 ---
 """,
@@ -50,7 +50,7 @@ metadata:
 
         def _fake_http_get_json(url, timeout=5.0):
             if "pypi.org" in url:
-                return {"info": {"version": "2.4.0"}}
+                return {"info": {"version": "2.5.0"}}
             raise AssertionError(url)
 
         def _fake_http_get_text(url, timeout=5.0):
@@ -62,7 +62,7 @@ metadata:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.4.0"
+    version: "2.5.0"
 ---
 """
 
@@ -81,12 +81,12 @@ metadata:
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["package"]["latest_version"] == "2.4.0"
+        assert payload["package"]["latest_version"] == "2.5.0"
         assert payload["package"]["update_available"] is True
-        assert payload["skill"]["local_version"] == "2.3.1"
-        assert payload["skill"]["latest_version"] == "2.4.0"
+        assert payload["skill"]["local_version"] == "2.4.0"
+        assert payload["skill"]["latest_version"] == "2.5.0"
         assert payload["skill"]["remote_url"] == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
-        assert payload["skill"]["installed_package_version"] == "2.3.1"
+        assert payload["skill"]["installed_package_version"] == "2.4.0"
         assert payload["skill"]["matches_installed_package"] is True
         assert "pip install -U clawlock" in payload["suggested_updates"]
         assert (
@@ -1265,6 +1265,8 @@ class TestScanHistory:
         import clawlock.utils as u
 
         monkeypatch.setattr(u, "HISTORY_FILE", tmp_path / "history.json")
+        monkeypatch.setattr(u, "DB_PATH", tmp_path / "history.db")
+        monkeypatch.setattr(u, "_LEGACY_IMPORTED_FLAG", tmp_path / ".imported")
         u.record_scan("openclaw", 85, 1, 2, 5)
         u.record_scan("zeroclaw", 70, 3, 1, 8)
         records = u.get_scan_history(10)

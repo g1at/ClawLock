@@ -7,8 +7,10 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -246,54 +248,126 @@ def device_fingerprint() -> str:
 
 
 # ─── Scan history persistence ────────────────────────────────────────────────
+#
+# Storage is SQLite (``~/.clawlock/clawlock.db``). Concurrent ``clawlock``
+# processes can append safely thanks to WAL mode and SQLite's own locking,
+# something the previous JSON-on-disk implementation could not guarantee.
+# ``HISTORY_FILE`` is kept as a module attribute pointing at the legacy JSON
+# location so test fixtures and the one-off importer can still address it.
 
 HISTORY_FILE = Path.home() / ".clawlock" / "scan_history.json"
-_HISTORY_CACHE: list | None = None
-_HISTORY_CACHE_PATH: Path | None = None
+DB_PATH = Path.home() / ".clawlock" / "clawlock.db"
+_LEGACY_IMPORTED_FLAG = Path.home() / ".clawlock" / ".history-imported"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT NOT NULL,
+    adapter TEXT NOT NULL DEFAULT '',
+    device TEXT NOT NULL DEFAULT '',
+    score INTEGER NOT NULL DEFAULT 0,
+    critical INTEGER NOT NULL DEFAULT 0,
+    warning INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_scans_time ON scans(time);
+
+CREATE TABLE IF NOT EXISTS findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT 'info',
+    location TEXT NOT NULL DEFAULT '',
+    measure_ids TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_findings_level ON findings(level);
+"""
 
 
-def _history_cache_matches() -> bool:
-    return _HISTORY_CACHE_PATH == HISTORY_FILE
-
-
-def _load_history() -> list:
-    global _HISTORY_CACHE, _HISTORY_CACHE_PATH
-
-    if _HISTORY_CACHE is not None and _history_cache_matches():
-        return list(_HISTORY_CACHE)
-
+@contextmanager
+def _connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0, isolation_level=None)
     try:
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if HISTORY_FILE.exists():
-            import json
+        conn.execute("PRAGMA journal_mode=WAL")
+        for stmt in _SCHEMA.strip().split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                conn.execute(stmt)
+        yield conn
+    finally:
+        conn.close()
 
-            _HISTORY_CACHE = json.loads(HISTORY_FILE.read_text())
-            _HISTORY_CACHE_PATH = HISTORY_FILE
-            return list(_HISTORY_CACHE)
+
+def _import_legacy_history_once() -> None:
+    """One-time import of any existing ``scan_history.json`` into SQLite.
+
+    Idempotent: presence of ``.history-imported`` marker (or a missing legacy
+    file) skips re-import. The legacy file is renamed to ``.imported`` so it
+    survives as a backup but does not get re-ingested.
+    """
+    import json as _json
+
+    if _LEGACY_IMPORTED_FLAG.exists():
+        return
+    legacy = HISTORY_FILE
+    if not legacy.exists():
+        try:
+            _LEGACY_IMPORTED_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            _LEGACY_IMPORTED_FLAG.touch()
+        except Exception:
+            pass
+        return
+    try:
+        records = _json.loads(legacy.read_text(encoding="utf-8"))
+    except Exception:
+        records = []
+    if isinstance(records, list):
+        try:
+            with _connect() as conn:
+                for r in records:
+                    if not isinstance(r, dict):
+                        continue
+                    cur = conn.execute(
+                        "INSERT INTO scans (time, adapter, device, score, critical, warning, total) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            str(r.get("time", "")),
+                            str(r.get("adapter", "")),
+                            str(r.get("device", "")),
+                            int(r.get("score", 0)),
+                            int(r.get("critical", 0)),
+                            int(r.get("warning", 0)),
+                            int(r.get("total", 0)),
+                        ),
+                    )
+                    scan_id = cur.lastrowid
+                    for f in r.get("findings", []) or []:
+                        if not isinstance(f, dict):
+                            continue
+                        conn.execute(
+                            "INSERT INTO findings (scan_id, title, level, location, measure_ids) "
+                            "VALUES (?,?,?,?,?)",
+                            (
+                                scan_id,
+                                str(f.get("title", "")),
+                                str(f.get("level", "info")),
+                                str(f.get("location", "")),
+                                _json.dumps(f.get("measure_ids", []) or [], ensure_ascii=False),
+                            ),
+                        )
+        except Exception:
+            return
+    try:
+        legacy.rename(legacy.with_suffix(".json.imported"))
     except Exception:
         pass
-
-    _HISTORY_CACHE = []
-    _HISTORY_CACHE_PATH = HISTORY_FILE
-    return []
-
-
-def _save_history(records: list):
-    global _HISTORY_CACHE, _HISTORY_CACHE_PATH
-    import json
-
-    cached = list(records[-100:])
-    _HISTORY_CACHE = cached
-    _HISTORY_CACHE_PATH = HISTORY_FILE
-
     try:
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        HISTORY_FILE.write_text(json.dumps(cached, ensure_ascii=False, indent=2))
+        _LEGACY_IMPORTED_FLAG.touch()
     except Exception:
-        # Persistence is best-effort; scans should still succeed when the
-        # runtime cannot write to the user's home directory.
-        return False
-    return True
+        pass
 
 
 def record_scan(
@@ -304,25 +378,95 @@ def record_scan(
     findings_total: int,
     findings_summary: list | None = None,
 ):
-    """Append a scan result to persistent history."""
+    """Append a scan result to persistent history (SQLite-backed)."""
+    import json as _json
     from datetime import datetime
 
-    records = _load_history()
-    entry = {
-        "time": datetime.now().isoformat(),
-        "adapter": adapter,
-        "device": device_fingerprint(),
-        "score": score,
-        "critical": critical,
-        "warning": warning,
-        "total": findings_total,
-    }
-    if findings_summary is not None:
-        entry["findings"] = findings_summary
-    records.append(entry)
-    _save_history(records)
+    _import_legacy_history_once()
+    try:
+        with _connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO scans (time, adapter, device, score, critical, warning, total) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    datetime.now().isoformat(),
+                    adapter,
+                    device_fingerprint(),
+                    int(score),
+                    int(critical),
+                    int(warning),
+                    int(findings_total),
+                ),
+            )
+            scan_id = cur.lastrowid
+            for f in findings_summary or []:
+                if not isinstance(f, dict):
+                    continue
+                conn.execute(
+                    "INSERT INTO findings (scan_id, title, level, location, measure_ids) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        scan_id,
+                        str(f.get("title", "")),
+                        str(f.get("level", "info")),
+                        str(f.get("location", "")),
+                        _json.dumps(f.get("measure_ids", []) or [], ensure_ascii=False),
+                    ),
+                )
+    except Exception:
+        # Persistence is best-effort; scans should still succeed even if the
+        # SQLite write fails (read-only home, locked DB, etc.).
+        return False
+    return True
 
 
 def get_scan_history(limit: int = 20) -> list:
-    """Return last N scan records."""
-    return _load_history()[-limit:]
+    """Return last N scan records, oldest-first (matches legacy JSON order)."""
+    import json as _json
+
+    _import_legacy_history_once()
+    out: list = []
+    try:
+        with _connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT id, time, adapter, device, score, critical, warning, total "
+                    "FROM scans ORDER BY id DESC LIMIT ?",
+                    (int(limit),),
+                )
+            )
+    except Exception:
+        return out
+    for row in reversed(rows):
+        scan_id, t_iso, adapter, device, score, critical, warning, total = row
+        findings: list = []
+        try:
+            with _connect() as conn:
+                for f in conn.execute(
+                    "SELECT title, level, location, measure_ids FROM findings WHERE scan_id = ?",
+                    (scan_id,),
+                ):
+                    title, level, location, measure_ids_json = f
+                    entry = {"title": title, "level": level, "location": location}
+                    try:
+                        ids = _json.loads(measure_ids_json or "[]")
+                        if ids:
+                            entry["measure_ids"] = ids
+                    except Exception:
+                        pass
+                    findings.append(entry)
+        except Exception:
+            findings = []
+        out.append(
+            {
+                "time": t_iso,
+                "adapter": adapter,
+                "device": device,
+                "score": score,
+                "critical": critical,
+                "warning": warning,
+                "total": total,
+                "findings": findings,
+            }
+        )
+    return out

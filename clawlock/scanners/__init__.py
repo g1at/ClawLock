@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.3.1 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.4.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -10,7 +10,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..adapters import AdapterSpec, load_config, run_cmd
 from ..i18n import t
 
@@ -18,6 +18,26 @@ CRIT = "critical"
 HIGH = "high"
 WARN = "medium"
 INFO = "info"
+
+# Map any incoming level string (from external tools, audit output, agent
+# scanners, etc.) to one of the four canonical levels. Keeping this in one
+# place stops the rest of the codebase from having to defend against random
+# spellings like "warning" / "review" / "Severe".
+_LEVEL_ALIASES: Dict[str, str] = {
+    "critical": CRIT, "crit": CRIT, "severe": CRIT, "fatal": CRIT,
+    "high": HIGH, "error": HIGH, "err": HIGH,
+    "medium": WARN, "warn": WARN, "warning": WARN,
+    "review": WARN, "moderate": WARN, "mid": WARN,
+    "info": INFO, "low": INFO, "informational": INFO,
+    "ok": INFO, "passed": INFO, "none": INFO,
+}
+
+
+def normalize_level(level: str) -> str:
+    """Return one of CRIT / HIGH / WARN / INFO for any input string."""
+    if not level:
+        return INFO
+    return _LEVEL_ALIASES.get(str(level).lower().strip(), INFO)
 
 
 @dataclass
@@ -31,113 +51,299 @@ class Finding:
     remediation: str = ""
     metadata: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.level = normalize_level(self.level)
 
-_CONFIG_RULES: Dict[str, List[tuple]] = {
-    "openclaw": [
-        (
-            "gatewayAuth",
-            lambda v: not v,
-            CRIT,
-            t("Gateway 鉴权未开启", "Gateway auth not enabled"),
-            t("任何能访问端口的人可直接连接 agent。", "Anyone with port access can connect to the agent directly."),
-            t("设置 gatewayAuth: true 并配置 token。", "Set gatewayAuth: true and configure a token."),
+
+@dataclass
+class ConfigRule:
+    """Single source of truth for static config audit rules.
+
+    A rule is consumed by ``scan_config`` (filtered by ``adapters``) and / or
+    by the OWASP-ASI agent scanner (filtered by ``asi is not None``). Keeping
+    the registry shared lets ``measure_ids`` and ``asi`` tags travel with the
+    rule rather than living in lookup tables that drift out of sync.
+    """
+
+    key: str
+    check: Callable[[Any], bool]
+    level: str
+    title: str
+    detail: str
+    remediation: str = ""
+    adapters: List[str] = field(default_factory=list)  # empty == universal
+    measure_ids: List[str] = field(default_factory=list)
+    asi: Optional[str] = None
+
+
+_ERROR_LOG_MAX_BYTES = 1024 * 1024  # 1 MiB before rotation
+
+
+def _log_scanner_error(label: str, exc: BaseException) -> None:
+    """Append a traceback for `label` to ~/.clawlock/error.log with rotation.
+
+    When the log exceeds 1 MiB it is rotated to error.log.1 (overwriting any
+    previous rotation) so heavy users do not accumulate unbounded files.
+    """
+    import traceback as _tb
+    from datetime import datetime as _dt
+
+    try:
+        log_dir = Path.home() / ".clawlock"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "error.log"
+        if log_path.exists() and log_path.stat().st_size > _ERROR_LOG_MAX_BYTES:
+            rotated = log_dir / "error.log.1"
+            try:
+                if rotated.exists():
+                    rotated.unlink()
+                log_path.rename(rotated)
+            except Exception:
+                # Rotation is best-effort; if it fails just keep appending.
+                pass
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n--- {_dt.now().isoformat()} {label} ---\n")
+            fh.write(_tb.format_exc())
+    except Exception:
+        pass
+
+
+def _scanner_error_finding(label: str, exc: BaseException) -> "Finding":
+    """Build a WARN finding describing a scanner crash and persist a traceback.
+
+    Used by the scan orchestrator so a failing scanner is visible in the
+    report instead of silently producing zero findings. Scanner name is
+    "internal" so reporters can opt these out of security scoring.
+    """
+    _log_scanner_error(label, exc)
+    return Finding(
+        scanner="internal",
+        level=WARN,
+        title=t(f"扫描器异常：{label}", f"Scanner failed: {label}"),
+        detail=t(
+            f"{type(exc).__name__}: {exc}. 详见 ~/.clawlock/error.log",
+            f"{type(exc).__name__}: {exc}. See ~/.clawlock/error.log for details.",
         ),
-        (
-            "allowedDirectories",
-            lambda v: isinstance(v, list) and "/" in v,
-            HIGH,
-            t("文件访问范围包含根目录", "File access scope includes root directory"),
-            t("skill 可读写系统任意文件。", "Skills can read/write any file on the system."),
-            t("收紧到项目目录。", "Restrict to the project directory."),
+        remediation=t(
+            "查看 ~/.clawlock/error.log 中的完整堆栈，并向 ClawLock 反馈。",
+            "Inspect ~/.clawlock/error.log for the full traceback and report the issue to ClawLock.",
         ),
-        (
-            "enableBrowserControl",
-            lambda v: v is True,
-            WARN,
-            t("已开启浏览器控制权限", "Browser control enabled"),
-            t("agent 可控制本地浏览器会话。", "Agent can control local browser sessions."),
-            t("设置 enableBrowserControl: false。", "Set enableBrowserControl: false."),
-        ),
-        (
-            "allowNetworkAccess",
-            lambda v: v is True,
-            WARN,
-            t("网络访问未配置白名单", "Network access has no allowlist"),
-            t("skill 可向任意地址发起请求。", "Skills can make requests to any address."),
-            t("配置 allowedNetworkDomains 白名单。", "Configure allowedNetworkDomains allowlist."),
-        ),
-        (
-            "sessionRetentionDays",
-            lambda v: isinstance(v, int) and v > 30,
-            INFO,
-            t("会话日志保留时间过长", "Session log retention too long"),
-            t("超过 30 天。", "Exceeds 30 days."),
-            t("设置 sessionRetentionDays: 7。", "Set sessionRetentionDays: 7."),
-        ),
-    ],
-    "zeroclaw": [
-        (
-            "auth.enabled",
-            lambda v: not v,
-            CRIT,
-            t("ZeroClaw 鉴权未开启", "ZeroClaw auth not enabled"),
-            t("服务端口未设置认证。", "Service port has no authentication."),
-            t("启用 auth.enabled: true。", "Enable auth.enabled: true."),
-        ),
-        (
-            "filesystem.allowedPaths",
-            lambda v: isinstance(v, list) and any((p in ("/", "~") for p in v)),
-            HIGH,
-            t("文件访问范围过宽", "File access scope too broad"),
-            t("allowedPaths 包含根路径。", "allowedPaths includes root path."),
-            t("限制到项目路径。", "Restrict to the project path."),
-        ),
-    ],
-    "claude-code": [
-        (
-            "permissions.allow",
-            lambda v: isinstance(v, list) and any(("**" in str(p) for p in v)),
-            WARN,
-            t("权限使用通配符 **", "Permissions use ** wildcard"),
-            t("settings.json 中存在 ** 通配符。", "** wildcard found in settings.json."),
-            t("替换为具体路径。", "Replace with specific paths."),
-        )
-    ],
-    "_common": [
-        (
-            "server.host",
-            lambda v: v in ("0.0.0.0", "::", "*"),
-            HIGH,
-            t("服务绑定到所有网络接口", "Service bound to all network interfaces"),
-            t("外部网络可能直接访问。", "External networks may access directly."),
-            t("绑定到 127.0.0.1。", "Bind to 127.0.0.1."),
-        ),
-        (
-            "tls.enabled",
-            lambda v: v in (False, "disabled", None),
-            WARN,
-            t("TLS/HTTPS 未启用", "TLS/HTTPS not enabled"),
-            t("通信未加密。", "Communication is not encrypted."),
-            t("启用 TLS。", "Enable TLS."),
-        ),
-        (
-            "approvalMode",
-            lambda v: v in (False, "none", "disabled", None),
-            WARN,
-            t("操作审批未启用", "Operation approval not enabled"),
-            t("高危操作无需确认。", "High-risk operations require no confirmation."),
-            t("启用审批模式。", "Enable approval mode."),
-        ),
-        (
-            "rateLimit.enabled",
-            lambda v: v in (False, None, "disabled"),
-            WARN,
-            t("未配置速率限制", "Rate limiting not configured"),
-            t("可被暴力破解或滥用，可能导致 API 额度耗尽。", "Vulnerable to brute force or abuse; may exhaust API quota."),
-            t("为 Gateway 配置请求速率限制。", "Configure request rate limiting for the Gateway."),
-        ),
-    ],
-}
+    )
+
+
+CONFIG_RULES: List[ConfigRule] = [
+    # ── Adapter-scoped rules (no ASI tag — surfaced by ``scan_config``) ──
+    ConfigRule(
+        key="gatewayAuth",
+        check=lambda v: not v,
+        level=CRIT,
+        title=t("Gateway 鉴权未开启", "Gateway auth not enabled"),
+        detail=t("任何能访问端口的人可直接连接 agent。", "Anyone with port access can connect to the agent directly."),
+        remediation=t("设置 gatewayAuth: true 并配置 token。", "Set gatewayAuth: true and configure a token."),
+        adapters=["openclaw"],
+        measure_ids=["H002"],
+    ),
+    ConfigRule(
+        key="allowedDirectories",
+        check=lambda v: isinstance(v, list) and "/" in v,
+        level=HIGH,
+        title=t("文件访问范围包含根目录", "File access scope includes root directory"),
+        detail=t("skill 可读写系统任意文件。", "Skills can read/write any file on the system."),
+        remediation=t("收紧到项目目录。", "Restrict to the project directory."),
+        adapters=["openclaw"],
+        measure_ids=["H001"],
+    ),
+    ConfigRule(
+        key="enableBrowserControl",
+        check=lambda v: v is True,
+        level=WARN,
+        title=t("已开启浏览器控制权限", "Browser control enabled"),
+        detail=t("agent 可控制本地浏览器会话。", "Agent can control local browser sessions."),
+        remediation=t("设置 enableBrowserControl: false。", "Set enableBrowserControl: false."),
+        adapters=["openclaw"],
+        measure_ids=["H004"],
+    ),
+    ConfigRule(
+        key="allowNetworkAccess",
+        check=lambda v: v is True,
+        level=WARN,
+        title=t("网络访问未配置白名单", "Network access has no allowlist"),
+        detail=t("skill 可向任意地址发起请求。", "Skills can make requests to any address."),
+        remediation=t("配置 allowedNetworkDomains 白名单。", "Configure allowedNetworkDomains allowlist."),
+        adapters=["openclaw"],
+        measure_ids=["H005"],
+    ),
+    ConfigRule(
+        key="sessionRetentionDays",
+        check=lambda v: isinstance(v, int) and v > 30,
+        level=INFO,
+        title=t("会话日志保留时间过长", "Session log retention too long"),
+        detail=t("超过 30 天。", "Exceeds 30 days."),
+        remediation=t("设置 sessionRetentionDays: 7。", "Set sessionRetentionDays: 7."),
+        adapters=["openclaw"],
+        measure_ids=["H003"],
+    ),
+    ConfigRule(
+        key="auth.enabled",
+        check=lambda v: not v,
+        level=CRIT,
+        title=t("ZeroClaw 鉴权未开启", "ZeroClaw auth not enabled"),
+        detail=t("服务端口未设置认证。", "Service port has no authentication."),
+        remediation=t("启用 auth.enabled: true。", "Enable auth.enabled: true."),
+        adapters=["zeroclaw"],
+        measure_ids=["H002"],
+    ),
+    ConfigRule(
+        key="filesystem.allowedPaths",
+        check=lambda v: isinstance(v, list) and any(p in ("/", "~") for p in v),
+        level=HIGH,
+        title=t("文件访问范围过宽", "File access scope too broad"),
+        detail=t("allowedPaths 包含根路径。", "allowedPaths includes root path."),
+        remediation=t("限制到项目路径。", "Restrict to the project path."),
+        adapters=["zeroclaw"],
+        measure_ids=["H001"],
+    ),
+    ConfigRule(
+        key="permissions.allow",
+        check=lambda v: isinstance(v, list) and any("**" in str(p) for p in v),
+        level=WARN,
+        title=t("权限使用通配符 **", "Permissions use ** wildcard"),
+        detail=t("settings.json 中存在 ** 通配符。", "** wildcard found in settings.json."),
+        remediation=t("替换为具体路径。", "Replace with specific paths."),
+        adapters=["claude-code"],
+        measure_ids=["H001"],
+    ),
+    ConfigRule(
+        key="server.host",
+        check=lambda v: v in ("0.0.0.0", "::", "*"),
+        level=HIGH,
+        title=t("服务绑定到所有网络接口", "Service bound to all network interfaces"),
+        detail=t("外部网络可能直接访问。", "External networks may access directly."),
+        remediation=t("绑定到 127.0.0.1。", "Bind to 127.0.0.1."),
+        measure_ids=["H006"],
+    ),
+    ConfigRule(
+        key="tls.enabled",
+        check=lambda v: v in (False, "disabled", None),
+        level=WARN,
+        title=t("TLS/HTTPS 未启用", "TLS/HTTPS not enabled"),
+        detail=t("通信未加密。", "Communication is not encrypted."),
+        remediation=t("启用 TLS。", "Enable TLS."),
+    ),
+    ConfigRule(
+        key="approvalMode",
+        check=lambda v: v in (False, "none", "disabled", None),
+        level=WARN,
+        title=t("操作审批未启用", "Operation approval not enabled"),
+        detail=t("高危操作无需确认。", "High-risk operations require no confirmation."),
+        remediation=t("启用审批模式。", "Enable approval mode."),
+        measure_ids=["H008"],
+    ),
+    ConfigRule(
+        key="rateLimit.enabled",
+        check=lambda v: v in (False, None, "disabled"),
+        level=WARN,
+        title=t("未配置速率限制", "Rate limiting not configured"),
+        detail=t("可被暴力破解或滥用，可能导致 API 额度耗尽。", "Vulnerable to brute force or abuse; may exhaust API quota."),
+        remediation=t("为 Gateway 配置请求速率限制。", "Configure request rate limiting for the Gateway."),
+        measure_ids=["H010"],
+    ),
+    # ── ASI-scoped rules (surfaced only by ``scan_agent_config``) ──
+    ConfigRule(
+        key="tools.exec.security",
+        check=lambda v: v in (None, "allow", ""),
+        level=CRIT,
+        title=t("执行策略未限制", "Execution policy unrestricted"),
+        detail=t("tools.exec.security 未设为 deny/allowlist，agent 可执行任意命令。", "tools.exec.security is not set to deny/allowlist; agent can execute arbitrary commands."),
+        remediation=t("设为 security: deny 或 security: allowlist。", "Set security: deny or security: allowlist."),
+        asi="ASI-01",
+    ),
+    ConfigRule(
+        key="tools.exec.ask",
+        check=lambda v: v in (None, "off", "never"),
+        level=HIGH,
+        title=t("命令执行无需审批", "Command execution requires no approval"),
+        detail=t("tools.exec.ask 未开启，命令执行不弹审批提示。", "tools.exec.ask is not enabled; command execution does not prompt for approval."),
+        remediation=t("设为 ask: always 或 ask: on-miss。", "Set ask: always or ask: on-miss."),
+        asi="ASI-01",
+        measure_ids=["H008"],
+    ),
+    ConfigRule(
+        key="gateway.auth.token",
+        check=lambda v: not v,
+        level=CRIT,
+        title=t("Gateway 无认证", "Gateway has no authentication"),
+        detail=t("未配置 gateway.auth.token/password，服务端口完全开放。", "gateway.auth.token/password not configured; service port is fully open."),
+        remediation=t("设置强随机 gateway.auth.token。", "Set a strong random gateway.auth.token."),
+        asi="ASI-05",
+        measure_ids=["H002"],
+    ),
+    ConfigRule(
+        key="gateway.bind",
+        check=lambda v: v and v not in ("loopback", "127.0.0.1", "localhost"),
+        level=HIGH,
+        title=t("Gateway 绑定非回环地址", "Gateway bound to non-loopback address"),
+        detail=t("Gateway 暴露到网络，增加攻击面。", "Gateway is exposed to the network, increasing attack surface."),
+        remediation=t("设为 bind: loopback 或通过 SSH/Tailscale 隧道访问。", "Set bind: loopback or access via SSH/Tailscale tunnel."),
+        asi="ASI-05",
+        measure_ids=["H006"],
+    ),
+    ConfigRule(
+        key="tools.browser.enabled",
+        check=lambda v: v is True,
+        level=WARN,
+        title=t("浏览器控制已开启", "Browser control is enabled"),
+        detail=t("Agent 可操控浏览器，带来 cookie 窃取等风险。", "Agent can control the browser, risking cookie theft and more."),
+        remediation=t("仅在需要时开启。", "Enable only when needed."),
+        asi="ASI-09",
+        measure_ids=["H004"],
+    ),
+    ConfigRule(
+        key="tools.sessions.visibility",
+        check=lambda v: v in (None, "all"),
+        level=WARN,
+        title=t("会话可见性过宽", "Session visibility too broad"),
+        detail=t("会话工具可跨会话访问对话内容。", "Session tools can access conversation content across sessions."),
+        remediation=t("设为 visibility: self 或 visibility: tree。", "Set visibility: self or visibility: tree."),
+        asi="ASI-09",
+    ),
+    ConfigRule(
+        key="agents.defaults.sandbox.mode",
+        check=lambda v: v in (None, "off", ""),
+        level=HIGH,
+        title=t("沙箱模式未开启", "Sandbox mode not enabled"),
+        detail=t("Agent 直接在宿主环境执行，无容器隔离。", "Agent runs directly on host without container isolation."),
+        remediation=t("设为 sandbox.mode: docker。", "Set sandbox.mode: docker."),
+        asi="ASI-11",
+    ),
+    ConfigRule(
+        key="agents.defaults.sandbox.docker.network",
+        check=lambda v: v and v != "none",
+        level=WARN,
+        title=t("沙箱容器有网络访问", "Sandbox container has network access"),
+        detail=t("沙箱网络未隔离，容器可访问网络。", "Sandbox network not isolated; container can access the network."),
+        remediation=t("设为 docker.network: none。", "Set docker.network: none."),
+        asi="ASI-11",
+    ),
+    ConfigRule(
+        key="commands.ownerDisplay",
+        check=lambda v: v in (None, "visible", ""),
+        level=WARN,
+        title=t("所有者信息暴露在提示词中", "Owner information exposed in prompts"),
+        detail=t("所有者身份可能被第三方模型提供者看到。", "Owner identity may be visible to third-party model providers."),
+        remediation=t("设为 ownerDisplay: hash 并配置 ownerDisplaySecret。", "Set ownerDisplay: hash and configure ownerDisplaySecret."),
+        asi="ASI-12",
+    ),
+    ConfigRule(
+        key="hooks.allowRequestSessionKey",
+        check=lambda v: v is True,
+        level=HIGH,
+        title=t("Hook 允许指定 sessionKey", "Hook allows specifying sessionKey"),
+        detail=t("外部可通过 hook 定向路由消息到指定会话。", "External parties can route messages to specific sessions via hooks."),
+        remediation=t("设为 allowRequestSessionKey: false。", "Set allowRequestSessionKey: false."),
+        asi="ASI-08",
+    ),
+]
 SECRET_PATTERNS = [
     ("sk-(?!ant-)[A-Za-z0-9]{20,}", "OpenAI API Key"),
     ("ghp_[A-Za-z0-9]{36}", "GitHub PAT"),
@@ -152,6 +358,7 @@ SECRET_PATTERNS = [
     ("sk-ant-[A-Za-z0-9\\-]{20,}", "Anthropic API Key"),
 ]
 _COMPILED_SECRET_PATTERNS = [(re.compile(p), label) for p, label in SECRET_PATTERNS]
+
 RISKY_ENV_VARS = [
     "NODE_OPTIONS",
     "LD_PRELOAD",
@@ -175,14 +382,86 @@ def _get_nested(d: dict, dotpath: str):
     return cur
 
 
-def _check_secrets(obj: Any, path: str) -> List[Finding]:
-    findings = []
+_MAX_NESTED_DEPTH = 50  # caps recursive walks; legit configs are <10 deep
+
+
+# ── BIP39 / wallet mnemonic heuristic ────────────────────────────────────────
+# A run of 12, 18, or 24 short lowercase words separated by single spaces is
+# strongly suggestive of a BIP39 mnemonic phrase. Common English connectors
+# ("the", "and", "for", ...) virtually never appear in BIP39, so their
+# presence in the matched span is a strong negative signal.
+_MNEMONIC_RE = re.compile(
+    r"\b(?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8}\b"
+)
+_PROSE_INDICATORS = frozenset({
+    "the", "and", "but", "for", "with", "this", "that", "from", "into",
+    "your", "have", "has", "are", "was", "were", "you", "they", "them",
+    "their", "our", "his", "her", "not", "all", "any", "may", "can", "will",
+    "would", "could", "should", "use", "used", "uses", "via", "per",
+})
+
+
+def _looks_like_mnemonic(text: str) -> bool:
+    """Return True when *text* contains a plausible BIP39 mnemonic span.
+
+    Heuristic: a span of exactly 12, 18, or 24 short lowercase words
+    separated by single spaces, with no common English connectors. Real
+    BIP39 phrases can legitimately repeat words (the canonical test vector
+    has 11 ``abandon`` + 1 ``about``) so we do not require uniqueness.
+    """
+    match = _MNEMONIC_RE.search(text)
+    if not match:
+        return False
+    words = match.group(0).split()
+    if len(words) not in (12, 18, 24):
+        return False
+    if any(w in _PROSE_INDICATORS for w in words):
+        return False
+    return True
+
+
+def _check_mnemonic(obj: Any, path: str, depth: int = 0) -> List[Finding]:
+    """Detect plausible wallet mnemonic phrases in any string value."""
+    findings: List[Finding] = []
+    if depth > _MAX_NESTED_DEPTH:
+        return findings
     if isinstance(obj, dict):
         for k, v in obj.items():
-            findings.extend(_check_secrets(v, f"{path}.{k}"))
+            findings.extend(_check_mnemonic(v, f"{path}.{k}", depth + 1))
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
-            findings.extend(_check_secrets(item, f"{path}[{i}]"))
+            findings.extend(_check_mnemonic(item, f"{path}[{i}]", depth + 1))
+    elif isinstance(obj, str) and _looks_like_mnemonic(obj):
+        findings.append(
+            Finding(
+                "credential",
+                CRIT,
+                t("配置中发现疑似助记词", "Suspected wallet mnemonic in config"),
+                t(
+                    f"在 {path} 中发现 12/18/24 个短词组成的连续序列，疑似 BIP39 钱包助记词。",
+                    f"Found a continuous run of 12/18/24 short words at {path}; matches the shape of a BIP39 wallet mnemonic.",
+                ),
+                path,
+                remediation=t(
+                    "立即将助记词从配置中移除并视为已泄露，迁移到硬件钱包或安全密钥管理。",
+                    "Remove the mnemonic from config immediately, treat it as compromised, and migrate to a hardware wallet or secrets manager.",
+                ),
+                metadata={"category": "WALLET"},
+            )
+        )
+    return findings
+
+
+def _check_secrets(obj: Any, path: str, depth: int = 0) -> List[Finding]:
+    findings = []
+    if depth > _MAX_NESTED_DEPTH:
+        return findings
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            findings.extend(_check_secrets(v, f"{path}.{k}", depth + 1))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            findings.extend(_check_secrets(item, f"{path}[{i}]", depth + 1))
     elif isinstance(obj, str):
         for compiled_pat, label in _COMPILED_SECRET_PATTERNS:
             if compiled_pat.search(obj):
@@ -204,7 +483,9 @@ def _check_risky_env(config: dict, cfg_path: str) -> List[Finding]:
     """v1.1: Check for dangerous env vars (NODE_OPTIONS, LD_PRELOAD etc.) in skill/MCP config."""
     findings = []
 
-    def _walk(obj, path):
+    def _walk(obj, path, depth=0):
+        if depth > _MAX_NESTED_DEPTH:
+            return
         if isinstance(obj, dict):
             for k, v in obj.items():
                 if k.upper() in RISKY_ENV_VARS:
@@ -218,10 +499,10 @@ def _check_risky_env(config: dict, cfg_path: str) -> List[Finding]:
                             remediation=t(f"移除 {k} 或确认其值安全。", f"Remove {k} or verify its value is safe."),
                         )
                     )
-                _walk(v, f"{path}.{k}")
+                _walk(v, f"{path}.{k}", depth + 1)
         elif isinstance(obj, list):
             for i, item in enumerate(obj):
-                _walk(item, f"{path}[{i}]")
+                _walk(item, f"{path}[{i}]", depth + 1)
 
     _walk(config, "config")
     return findings
@@ -302,23 +583,39 @@ def scan_config(adapter: AdapterSpec) -> Tuple[List[Finding], Optional[str]]:
             findings.extend(
                 _parse_native_audit_findings(out, cfg_path or "builtin-audit")
             )
-    for key, test_fn, level, title, detail, remediation in _CONFIG_RULES.get(
-        adapter.name, []
-    ) + _CONFIG_RULES.get("_common", []):
-        val = _get_nested(config, key)
-        if val is not None and test_fn(val):
-            findings.append(
-                Finding(
-                    "config",
-                    level,
-                    title,
-                    detail,
-                    f"config:{key}",
-                    remediation=remediation,
-                )
+    for rule in CONFIG_RULES:
+        # ``scan_config`` only fires non-ASI rules. ASI-tagged rules belong
+        # to the agent scanner so they're not double-counted in reports.
+        if rule.asi is not None:
+            continue
+        if rule.adapters and adapter.name not in rule.adapters:
+            continue
+        val = _get_nested(config, rule.key)
+        if val is None:
+            continue
+        try:
+            triggered = rule.check(val)
+        except Exception:
+            continue
+        if not triggered:
+            continue
+        metadata: Dict[str, Any] = {}
+        if rule.measure_ids:
+            metadata["measure_ids"] = list(rule.measure_ids)
+        findings.append(
+            Finding(
+                "config",
+                rule.level,
+                rule.title,
+                rule.detail,
+                f"config:{rule.key}",
+                remediation=rule.remediation,
+                metadata=metadata,
             )
+        )
     findings.extend(_check_secrets(config, cfg_path or "config"))
     findings.extend(_check_risky_env(config, cfg_path or "config"))
+    findings.extend(_check_mnemonic(config, cfg_path or "config"))
     return (findings, cfg_path)
 
 
@@ -913,9 +1210,70 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("chr() 字符拼接（疑似混淆）", "chr() character concatenation (suspected obfuscation)"),
         t("使用多次 chr() 调用拼接字符串，可能隐藏恶意指令。", "Multiple chr() calls concatenating a string may hide malicious instructions."),
     ),
+    # ── Wallet / mnemonic handling (BIP39, derivation paths, drainers) ──
+    (
+        r"(?i)(?:from\s+bip_utils|from\s+mnemonic\b|import\s+mnemonic\b|require\s*\(\s*['\"]bip39['\"]|from\s+eth_account(?:\.hdaccount)?|from\s+@scure/bip39\b|from\s+ethers(?:/wallet)?)",
+        HIGH,
+        t("引用钱包助记词库", "Imports a wallet mnemonic library"),
+        t("代码引用 BIP39/HD 钱包库，处理可能涉及助记词或私钥。", "Code imports a BIP39 / HD-wallet library; likely handles mnemonics or private keys."),
+    ),
+    (
+        r"(?i)\b(?:seed[_]?phrase|recovery[_]?phrase|mnemonic[_]?(?:words|phrase|seed)?|wallet[_]?seed)\s*[=:]",
+        HIGH,
+        t("代码处理钱包助记词", "Code handles wallet mnemonic"),
+        t("出现 seed_phrase / recovery_phrase / mnemonic 等变量赋值，存在助记词泄漏风险。", "Variables like seed_phrase / recovery_phrase / mnemonic suggest mnemonic handling and potential leakage."),
+    ),
+    (
+        r"\bm/44'?/(?:60|0|501|118|3)'?/\d+'?/\d+(?:'?/\d+)?",
+        HIGH,
+        t("BIP44 派生路径", "BIP44 derivation path"),
+        t("出现常见 BIP44 派生路径（ETH/BTC/SOL 等），通常意味着私钥派生。", "Detected common BIP44 derivation path (ETH/BTC/SOL etc.); typically indicates private key derivation."),
+    ),
+    (
+        r"(?i)\beth_sendTransaction\b[^\n]{0,200}[\"\']?to[\"\']?\s*[:=]\s*[\"\']0x[0-9a-fA-F]{40}[\"\']",
+        CRIT,
+        t("可能的钱包提币逻辑", "Potential wallet drain logic"),
+        t("eth_sendTransaction 的目的地址硬编码，可能是提币 (drain) 攻击。", "eth_sendTransaction with a hardcoded destination address may indicate a drain attack."),
+    ),
 ]
+# Pattern categories — surfaced on every skill finding via Finding.metadata
+# so reporters can group / filter by attack class. Each entry is matched
+# (in order) against the pattern's bilingual title+detail text.  More specific
+# rules come first; the first match wins.  Anything unmatched → "OTHER".
+_PATTERN_CATEGORY_RULES: List[Tuple[str, str]] = [
+    ("OBFUSCATION", r"零宽|zero[-\s]?width|fromCharCode|EncodedCommand|嵌套混淆|nested shell|chr\(\)|base64 解码|Base64 decoding|混淆|Unicode escape|Obfuscated payload"),
+    ("WALLET", r"BIP\d{2}|mnemonic|seed phrase|助记词|钱包|wallet|derivation path|派生路径|drain|提币"),
+    ("MINING", r"挖矿|cryptominer|xmrig|monero|coinhive|stratum"),
+    ("TUNNEL", r"ngrok|cloudflared|frpc|tunnel|隧道|reverse shell|反弹\s*shell|Reverse\s*shell"),
+    ("PERSISTENCE", r"cron|crontab|schtasks|RunOnce|LaunchAgent|systemd|persistence|持久化|Termux|计划任务|service registration|系统服务"),
+    ("DESTRUCTION", r"rm -rf|rmtree|removedirs|批量删除|系统目录|system director|recursive deletion|Recursive.*deletion|Disk-level|mkfs|低级写入|permission change|chmod|chown|icacls|Dangerous permission"),
+    ("SUPPLY_CHAIN", r"下载即执行|Download-and-execute|npx\b|uvx\b|pipx|pip\s+install\s+git|外部依赖|External dependency|runtime.*fetch"),
+    ("CREDENTIAL", r"凭据|凭证|credential|TOKEN|API\s*Key|SECRET|/etc/passwd|/etc/shadow|\.ssh|\.aws|SAM|\.npmrc|\.pypirc|\.netrc|包管理器凭证"),
+    ("EXFILTRATION", r"DNS exfiltration|webhook|外传|exfil"),
+    ("INJECTION", r"prompt injection|jailbreak|role hijacking|越狱|提示词注入|角色劫持|system prompt|系统提示词|工具覆盖|tool override|hijack|tool invocation|invoke.*tool|env var.*(?:being )?set|export.*injection"),
+    ("REGISTRY", r"reg add|registry write|注册表|HKLM|HKCU"),
+    ("RCE", r"\beval\b|\bexec\b|importlib|动态模块|module loading|FFI|ctypes|deserializ|反序列化|YAML load|yaml\.load|Dynamic module|dynamic import|untrusted data"),
+    ("LOLBIN", r"LOLBin|mshta|regsvr32|rundll32|certutil|bitsadmin|wmic"),
+    ("MCP", r"\bMCP\b"),
+    ("FILE_ACCESS", r"敏感文件|sensitive (?:system )?file|user private|用户隐私"),
+    ("NETWORK", r"socket\.|listen|网络服务端|external URL|外部 URL|Network server|external network|外部网络"),
+    ("EXECUTION", r"subprocess|child_process|os\.system|shell command|powershell"),
+]
+_COMPILED_PATTERN_CATEGORY_RULES = [
+    (cat, re.compile(rule, re.I)) for cat, rule in _PATTERN_CATEGORY_RULES
+]
+
+
+def _classify_pattern(title: str, detail: str = "") -> str:
+    text = f"{title}\n{detail}"
+    for cat, regex in _COMPILED_PATTERN_CATEGORY_RULES:
+        if regex.search(text):
+            return cat
+    return "OTHER"
+
+
 _COMPILED_MALICIOUS_PATTERNS = [
-    (re.compile(p), level, title, detail)
+    (re.compile(p), level, title, detail, _classify_pattern(title, detail))
     for p, level, title, detail in MALICIOUS_PATTERNS
 ]
 
@@ -966,7 +1324,7 @@ def scan_skill(skill_path: Path) -> List[Finding]:
             is_deobfuscated = False
             is_comment = _is_comment_line(line)
             for candidate in candidates:
-                for compiled_pat, level, title, detail in _COMPILED_MALICIOUS_PATTERNS:
+                for compiled_pat, level, title, detail, category in _COMPILED_MALICIOUS_PATTERNS:
                     # Skip non-CRIT patterns on comment lines to reduce false positives
                     if is_comment and level != CRIT:
                         continue
@@ -980,12 +1338,13 @@ def scan_skill(skill_path: Path) -> List[Finding]:
                             Finding(
                                 "skill",
                                 level,
-                                f"[{skill_name}] {title}{suffix}",
+                                f"[{category}] [{skill_name}] {title}{suffix}",
                                 detail,
                                 f"{f.name}:{i}",
                                 line.strip()[:120],
                                 metadata={
                                     "skill": skill_name,
+                                    "category": category,
                                     "file": str(f),
                                     "line": i,
                                     "deobfuscated": candidate is not line,
@@ -1004,7 +1363,7 @@ def scan_skill(skill_path: Path) -> List[Finding]:
                         Finding(
                             "skill",
                             WARN,
-                            t(f"[{skill_name}] Shell 命令嵌套混淆", f"[{skill_name}] Nested shell command obfuscation"),
+                            t(f"[OBFUSCATION] [{skill_name}] Shell 命令嵌套混淆", f"[OBFUSCATION] [{skill_name}] Nested shell command obfuscation"),
                             t(f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
                               f"Detected {len(unwrapped)} layers of shell wrapping; may attempt to bypass static analysis."),
                             f"{f.name}:{i}",
@@ -1012,6 +1371,7 @@ def scan_skill(skill_path: Path) -> List[Finding]:
                             remediation=t("审查解包后的实际命令。", "Review the unwrapped commands."),
                             metadata={
                                 "skill": skill_name,
+                                "category": "OBFUSCATION",
                                 "file": str(f),
                                 "line": i,
                                 "unwrapped_commands": unwrapped,
@@ -1393,18 +1753,19 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         candidates = [line]
         candidates.extend(_unwrap_shell_commands(line))
         for candidate in candidates:
-            for compiled_pat, level, title, detail in _COMPILED_MALICIOUS_PATTERNS:
+            for compiled_pat, level, title, detail, category in _COMPILED_MALICIOUS_PATTERNS:
                 if compiled_pat.search(candidate):
                     suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
                     findings.append(
                         Finding(
                             "skill_precheck",
                             level,
-                            t(f"[新 Skill: {skill_name}] {title}{suffix}", f"[New Skill: {skill_name}] {title}{suffix}"),
+                            t(f"[{category}] [新 Skill: {skill_name}] {title}{suffix}", f"[{category}] [New Skill: {skill_name}] {title}{suffix}"),
                             detail,
                             f"SKILL.md:{i}",
                             line.strip()[:120],
                             t("安装前仔细审查来源和代码。", "Carefully review the source and code before installing."),
+                            metadata={"category": category},
                         )
                     )
                     break
