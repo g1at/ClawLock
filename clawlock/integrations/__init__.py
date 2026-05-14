@@ -1,15 +1,10 @@
 ﻿"""
-ClawLock v2.4.0 integrations — cloud intelligence,
-external scanner, and Agent-Scan.
+ClawLock v2.5.0 integrations — cloud intelligence and Agent-Scan.
 """
 
 from __future__ import annotations
-import json
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 import httpx
@@ -154,46 +149,11 @@ def verdict_to_finding(skill_name: str, intel: dict) -> Optional[Finding]:
     )
 
 
-def _ext_installed() -> bool:
-    return shutil.which("ai-infra-guard") is not None
-
-
-def _ext_version() -> str:
-    if not _ext_installed():
-        return "not installed (using built-in engine)"
-    try:
-        r = subprocess.run(
-            ["ai-infra-guard", "--version"], capture_output=True, text=True, timeout=5
-        )
-        return r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-    except Exception:
-        return "unknown"
-
-
-def run_mcp_deep_scan(
-    code_path: Path, model: str = "", token: str = "", base_url: str = ""
-) -> list[Finding]:
-    """
-    MCP Server source code deep analysis.
-
-    Strategy: built-in engine always runs; ai-infra-guard binary enhances if installed.
-    """
+def run_mcp_deep_scan(code_path: Path) -> list[Finding]:
+    """MCP Server source code deep analysis via the built-in engine."""
     from ..scanners.mcp_deep import scan_mcp_source
 
-    findings = scan_mcp_source(code_path)
-    if _ext_installed() and model and token:
-        ext_findings = _run_ext_mcp(code_path, model, token, base_url)
-        if ext_findings:
-            findings.append(
-                Finding(
-                    "mcp_deep",
-                    INFO,
-                    t("ai-infra-guard 增强扫描结果 (ReAct agent 语义分析)", "ai-infra-guard enhanced scan results (ReAct agent semantic analysis)"),
-                    t(f"以下 {len(ext_findings)} 项由外部扫描器补充。", f"The following {len(ext_findings)} items were supplemented by external scanner."),
-                )
-            )
-            findings.extend(ext_findings)
-    return findings
+    return scan_mcp_source(code_path)
 
 
 def run_agent_scan(
@@ -221,73 +181,3 @@ def run_agent_scan(
         enable_llm=enable_llm,
     )
     return findings
-
-
-def _ext_token_env(model: str, token: str, base_url: str) -> dict:
-    """Pass enhancer credentials via env instead of argv where possible."""
-    env = {}
-    if not token:
-        return env
-    provider = (
-        "anthropic"
-        if "anthropic" in (base_url or "").lower()
-        or token.startswith("sk-ant-")
-        or model.lower().startswith(("claude", "anthropic"))
-        else "openai"
-    )
-    env["AI_INFRA_GUARD_TOKEN"] = token
-    if provider == "anthropic":
-        env["ANTHROPIC_API_KEY"] = token
-    else:
-        env["OPENAI_API_KEY"] = token
-    return env
-
-
-def _run_ext_mcp(
-    code_path: Path, model: str, token: str, base_url: str
-) -> list[Finding]:
-    """Run ai-infra-guard mcp binary as optional enhancer."""
-    with tempfile.TemporaryDirectory(prefix="clawlock-mcp-") as tmpdir:
-        out_path = Path(tmpdir) / "mcp_ext.json"
-        cmd = [
-            "ai-infra-guard",
-            "mcp",
-            "--code",
-            str(code_path),
-            "--model",
-            model,
-            "--json",
-            str(out_path),
-        ]
-        if base_url:
-            cmd += ["--base-url", base_url]
-        try:
-            env = os.environ.copy()
-            env.update(_ext_token_env(model, token, base_url))
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                env=env,
-            )
-            if result.returncode != 0 or not out_path.exists():
-                return []
-            results = json.loads(out_path.read_text(encoding="utf-8")).get(
-                "results", []
-            )
-            return [
-                Finding(
-                    "mcp_deep_ext",
-                    CRIT
-                    if str(it.get("severity", "")).lower() in ("critical", "high")
-                    else WARN,
-                    f"[AIG] {it.get('title', '')}",
-                    it.get("description", "")[:200],
-                    remediation=it.get("remediation", ""),
-                )
-                for it in results
-            ]
-        except Exception:
-            return []
-

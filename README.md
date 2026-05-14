@@ -176,9 +176,6 @@ ClawLock can optionally integrate with external tools, but only in the paths whe
 | Tool | Current integration in ClawLock | When it is used |
 |------|---------------------------------|-----------------|
 | [promptfoo](https://github.com/promptfoo/promptfoo) | `clawlock redteam` / optional scan red-team stage | When you run red-team tests against a live endpoint; ClawLock can use `promptfoo` directly or via `npx` |
-| [AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard) | Optional enhancer for `clawlock mcp-scan` | Only when the binary is installed and you also provide `--model` and `--token` |
-
-`AI-Infra-Guard` is **not** currently used as an external enhancer for `agent-scan`; `agent-scan` uses ClawLock's built-in engine plus the optional direct LLM layer.
 
 ## Command Overview
 
@@ -286,7 +283,6 @@ Useful areas to extend:
 We are deeply grateful to these open-source projects whose work inspires and enhances ClawLock:
 
 - **[promptfoo](https://github.com/promptfoo/promptfoo)** — A major inspiration behind ClawLock's red-team workflow. promptfoo's declarative configuration model, broad jailbreak and injection coverage, and OWASP-oriented evaluation approach helped shape how ClawLock thinks about endpoint red-team testing. Thank you to the promptfoo team for building such a versatile LLM evaluation platform.
-- **[AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard)** by Tencent Zhuque Lab — ClawLock benefits from the advisory work and broader AI infrastructure security research around AI-Infra-Guard. Our MCP implicit tool poisoning coverage is also informed by the MCP-ITP research ([arXiv:2601.07395](https://arxiv.org/abs/2601.07395)). Thank you for advancing practical security research for AI systems.
 
 ## License
 

@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.4.0"
+    version: "2.5.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -469,7 +469,6 @@ clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment l
 ```
 
 > **Dependency note:** All commands except `clawlock redteam` require only `pip install clawlock` — zero external binaries needed. `clawlock redteam` needs Node.js and runs through `promptfoo` or `npx`.
-> `ai-infra-guard` is optional and currently only enhances `mcp-scan` when the binary is installed and both `--model` and `--token` are provided.
 
 ---
 
@@ -591,6 +590,6 @@ This skill performs **static analysis**. It cannot:
 - Execute real attacks or confirm exploitability
 - Read system privacy directories, session records, or media files
 
-Since v1.1, MCP deep scan and Agent-Scan use built-in Python engines (regex + AST taint tracking) with no external binary dependencies. The built-in engines detect known patterns; for complex cross-function semantic vulnerabilities, enable the LLM assessment layer via `--llm` (requires API key).
+MCP deep scan and Agent-Scan use built-in Python engines (regex + AST taint tracking) with no external binary dependencies. The built-in engines detect known patterns; for complex cross-function semantic vulnerabilities, enable the LLM assessment layer via `--llm` (requires API key).
 
 All conclusions represent best-effort assessment within current check scope.

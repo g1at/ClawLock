@@ -1,14 +1,12 @@
 """
 ClawLock built-in MCP Server source code deep analysis engine.
 
-Replaces ai-infra-guard `mcp --code` with a zero-dependency Python engine:
+A zero-dependency Python engine providing:
   - AST-based analysis for Python/JS/TS MCP servers
-  - Regex patterns for 14 risk categories (AIG v4.1 equivalent)
+  - Regex patterns covering 14 risk categories
   - Data-flow taint tracking (source → sink) for credential/PII leaks
   - Tool description injection detection
   - Permission boundary violation checks
-
-Falls back to ai-infra-guard binary if installed (optional enhancement).
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ from ..scanners import Finding, CRIT, HIGH, WARN, INFO
 from ..i18n import t
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Risk categories (aligned with AIG v4.1 MCP 14 categories)
+# Risk categories (MCP 14 categories)
 # ═══════════════════════════════════════════════════════════════════════════════
 RISK_CATEGORIES = {
     "RCE": t("远程代码执行 (Remote Code Execution)", "Remote Code Execution"),
@@ -56,6 +54,7 @@ class McpPattern:
     title: str
     detail: str
     remediation: str = ""
+    suppress_if_auth_present: bool = False
 
 
 _MCP_PATTERNS: List[McpPattern] = [
@@ -128,6 +127,45 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("用户输入控制 HTTP 请求目标", "User input controls HTTP request target"),
         t("MCP 工具根据用户输入发起 HTTP 请求，未做 SSRF 防护。可被利用访问内部服务。", "MCP tool issues HTTP requests based on user input without SSRF protection, enabling access to internal services."),
         t("对 URL 做白名单校验，阻止 localhost/内网/元数据端点。", "Whitelist-validate URLs; block localhost, internal networks, and metadata endpoints."),
+    ),
+    McpPattern(
+        "SSRF",
+        HIGH,
+        re.compile(
+            # Cloud instance-metadata endpoints (AWS / GCP / Azure / OCI / Alibaba)
+            r"\b(?:"
+            r"169\.254\.169\.254"
+            r"|metadata\.google\.internal"
+            r"|metadata\.azure\.com"
+            r"|169\.254\.169\.123"
+            r"|metadata\.aliyun(?:cs)?\.com"
+            r"|metadata\.tencentyun\.com"
+            r"|100\.100\.100\.200"
+            r")\b",
+            re.I,
+        ),
+        t("引用云元数据服务端点", "Cloud metadata endpoint referenced"),
+        t("代码直接引用云实例元数据端点。若与用户可控 URL 组合，SSRF 可窃取实例临时凭证。", "Code references a cloud instance-metadata endpoint. Combined with user-controlled URLs this is exploitable via SSRF to steal instance credentials."),
+        t("在网络层封禁元数据端点；如必须访问，使用 IMDSv2 + 强制 hop-limit。", "Block metadata endpoints at the network layer; if required, use IMDSv2 + enforced hop-limit."),
+    ),
+    McpPattern(
+        "SSRF",
+        HIGH,
+        re.compile(
+            # Loopback / private-net encoded in non-canonical forms used to slip past blacklists.
+            r"(?:"
+            r"\b127\.(?:0\.0\.)?1\b(?!\.\d)"          # 127.1 short form
+            r"|\b0177\.(?:[0-9]+\.){2,3}[0-9]+\b"     # 0177.0.0.1 octal
+            r"|\b0x7[fF](?:\.[0-9a-fA-F]+){0,3}\b"    # 0x7f.0.0.1 hex
+            r"|\b2130706433\b"                         # 127.0.0.1 as 32-bit int
+            r"|\[::1\]"                                # IPv6 loopback
+            r"|\[::ffff:127\.0\.0\.1\]"                # IPv4-mapped IPv6 loopback
+            r"|\[fe80::"                               # IPv6 link-local
+            r")",
+        ),
+        t("可疑 IP 编码（疑似 SSRF 绕过）", "Suspicious IP encoding (suspected SSRF bypass)"),
+        t("出现非标准形式的回环/内网/链路本地 IP 编码——绕过 SSRF 黑名单的典型手法。", "Non-canonical loopback / private-net / link-local IP encoding detected — a typical SSRF allowlist-bypass technique."),
+        t("用 ipaddress.ip_address() 等解析后做地址族判断，禁止字符串黑名单。", "Use ipaddress.ip_address() (or equivalent) and reason about address family — never rely on string blacklists."),
     ),
     # ── LFI / Path Traversal ──
     McpPattern(
@@ -206,6 +244,7 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("HTTP 路由可能缺少鉴权中间件", "HTTP route may lack authentication middleware"),
         t("路由处理器直接接受请求，未经过认证/授权中间件。", "Route handler accepts requests directly without authentication/authorization middleware."),
         t("在路由或全局层添加认证中间件。", "Add authentication middleware at the route or global level."),
+        suppress_if_auth_present=True,
     ),
     McpPattern(
         "AUTHZ",
@@ -217,13 +256,18 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("公开暴露 MCP 工具调用路由", "Publicly exposed MCP tool invocation route"),
         t("检测到 /tools、/invoke 或 /call 等工具调用路由直接对外暴露。", "Detected a public /tools, /invoke, or /call style route exposed directly."),
         t("仅在经过鉴权后暴露工具调用路由。", "Expose tool invocation routes only after authentication and authorization."),
+        suppress_if_auth_present=True,
     ),
     # ── Prompt Injection Surface ──
     McpPattern(
         "PRMTI",
         HIGH,
         re.compile(
-            r'(?:description|tool_description|inputSchema)\s*[:=]\s*(?:f["\']|["\'].*?\{|`.*?\$\{)',
+            r'(?:description|tool_description|inputSchema)\s*[:=]\s*(?:'
+            r'(?:[rRbB]{0,2}f|f[rRbB]{0,2})["\']'   # Python f-string (also rf"", fr"", bf"" prefixes)
+            r"|`[^`]*\$\{"                            # JS template literal with ${...}
+            r'|["\'][^"\']*["\']\s*\+\s*\w'           # string + variable concatenation
+            r")",
             re.I,
         ),
         t("工具描述使用动态模板", "Tool description uses dynamic template"),
@@ -276,6 +320,20 @@ _MCP_PATTERNS: List[McpPattern] = [
         t("工具描述含 LLM 角色标签", "Tool description contains LLM role tags"),
         t("description 中嵌入了 LLM 角色分隔标签，可能劫持模型行为。", "Description embeds LLM role delimiter tags, potentially hijacking model behavior."),
         t("移除所有角色标签。", "Remove all role tags."),
+    ),
+    McpPattern(
+        "TOOLP",
+        CRIT,
+        re.compile(
+            # description = "...invisible-char..." — zero-width, bidi, BOM, tag chars.
+            # \U000E0000-\U000E007F is the Tag block (often used for AI poisoning).
+            r"(?:description|tool_description)\s*[:=]\s*[\"'][^\"']*"
+            r"[​-‏‪-‮⁠-⁯﻿\U000E0020-\U000E007F]"
+            r"[^\"']*[\"']",
+        ),
+        t("工具描述含零宽 / 不可见字符", "Tool description contains zero-width / invisible characters"),
+        t("description 字面量中嵌入了零宽空格、双向控制字符、BOM 或 Tag 块字符。这些在 UI 中不可见，但 LLM 会读取——是已知的 MCP 工具投毒载体（OWASP ASI-03 / 13）。", "Description literal embeds zero-width spaces, bidi controls, BOM, or Tag-block characters. Invisible in UIs but read by the LLM — a known MCP tool-poisoning vector (OWASP ASI-03 / 13)."),
+        t("从描述中删除所有 Cf/Mn 类 Unicode 字符；只保留可打印字符。", "Strip every Cf/Mn-class Unicode codepoint from the description; keep only printable characters."),
     ),
     # ── Data Leak Path ──
     McpPattern(
@@ -382,23 +440,64 @@ _MCP_PATTERNS: List[McpPattern] = [
 # Python AST-based deep analysis
 # ═══════════════════════════════════════════════════════════════════════════════
 _TAINT_SOURCES = {
-    "request",
-    "req",
-    "params",
-    "args",
-    "input",
-    "body",
-    "query",
-    "tool_input",
-    "arguments",
-    "kwargs",
-    "data",
+    # Generic HTTP-ish names
+    "request", "req", "params", "args", "input", "body", "query",
+    "arguments", "kwargs", "data",
+    # MCP / agent-framework conventions
+    "tool_input", "tool_use_block", "tool_args", "tool_call",
+    "ctx", "context",
+    # Webhooks / messaging
+    "payload", "event", "msg", "message",
+    "update",  # Telegram-bot convention
+    "webhook_payload", "envelope",
 }
+
+# Primitive type names — when a parameter's annotation root is one of these,
+# the parameter is NOT treated as an implicit taint source.
+_PRIMITIVE_TYPE_NAMES = {
+    "str", "int", "float", "bool", "bytes", "None", "Any",
+    "List", "Dict", "Set", "Tuple", "Optional", "Union", "Literal", "Iterable",
+    "list", "dict", "set", "tuple", "frozenset",
+}
+
+# FastAPI / Starlette / similar request-source markers. When used as the default
+# value of a function parameter, the parameter is fed from the HTTP request and
+# is therefore tainted.
+_REQUEST_PARAM_MARKERS = {
+    "Body", "Query", "Path", "Header", "Form", "File", "Cookie", "Depends",
+}
+
+# Functions whose return value is considered safe even when applied to tainted
+# input. Calls to these short-circuit taint propagation.
+_SANITIZERS = {
+    # Shell escaping
+    "shlex.quote", "shlex.split", "shlex.join",
+    "pipes.quote", "subprocess.list2cmdline",
+    # Regex / HTML / URL escaping
+    "re.escape", "html.escape", "html.unescape",
+    "urllib.parse.quote", "urllib.parse.quote_plus", "urllib.parse.urlencode",
+    # Path normalization (callers still need a containment check, but the
+    # normalized result alone is not the threat).
+    "os.path.realpath", "os.path.abspath", "os.path.normpath",
+    # Type coercion — discards anything that isn't the requested type.
+    "int", "float", "bool",
+    "uuid.UUID", "ipaddress.ip_address", "ipaddress.IPv4Address",
+}
+
+# Method-name suffixes that, when invoked, untaint the result. Covers patterns
+# like ``Path(x).resolve()`` and ``re.compile(p).escape(x)`` without needing
+# the full dotted name.
+_SANITIZER_METHOD_SUFFIXES = (
+    ".resolve", ".escape", ".quote", ".quote_plus",
+)
+
 _DANGEROUS_SINKS = {
     "os.system": ("CMDI", CRIT),
     "subprocess.run": ("CMDI", HIGH),
     "subprocess.call": ("CMDI", HIGH),
     "subprocess.Popen": ("CMDI", HIGH),
+    "subprocess.check_output": ("CMDI", HIGH),
+    "subprocess.check_call": ("CMDI", HIGH),
     "eval": ("RCE", CRIT),
     "exec": ("RCE", CRIT),
     "importlib.import_module": ("RCE", HIGH),
@@ -407,52 +506,400 @@ _DANGEROUS_SINKS = {
     "Path": ("LFI", WARN),
     "pickle.loads": ("DESER", HIGH),
     "yaml.load": ("DESER", HIGH),
+    "yaml.unsafe_load": ("DESER", CRIT),
+    "marshal.loads": ("DESER", HIGH),
+    # SQL raw execution variants (parameterised execute() is fine; the
+    # f-string check in regex patterns covers the formatted-SQL case).
+    "cursor.executescript": ("SQLI", HIGH),
 }
 
 
+def _annotation_root_name(annot: Optional[ast.AST]) -> str:
+    """Return the outermost name of a parameter annotation, ignoring subscripts
+    and attribute access. ``ToolArgs`` → ``ToolArgs``;
+    ``Optional[ToolArgs]`` → ``Optional``; ``models.ToolArgs`` → ``ToolArgs``."""
+    if annot is None:
+        return ""
+    if isinstance(annot, ast.Name):
+        return annot.id
+    if isinstance(annot, ast.Subscript):
+        return _annotation_root_name(annot.value)
+    if isinstance(annot, ast.Attribute):
+        return annot.attr
+    return ""
+
+
+def _is_tainted_param(arg: ast.arg, default: Optional[ast.expr]) -> bool:
+    """Return True if a function parameter should be considered an implicit
+    user-controlled (tainted) source.
+
+    The parameter is tainted when ANY of the following hold:
+      * its name is a known taint source (``request``, ``payload``, ...);
+      * the default is a FastAPI / Starlette request-source marker call
+        (``Body(...)``, ``Query(...)``, ``Depends(get_user)``, ...);
+      * the annotation root is a custom class — i.e. NOT a primitive type —
+        which strongly suggests a Pydantic / dataclass model carrying the
+        request payload.
+    """
+    if arg.arg in _TAINT_SOURCES:
+        return True
+    if isinstance(default, ast.Call):
+        marker = _annotation_root_name(default.func) or ""
+        if not marker and isinstance(default.func, ast.Name):
+            marker = default.func.id
+        if marker in _REQUEST_PARAM_MARKERS:
+            return True
+    type_root = _annotation_root_name(arg.annotation)
+    if (
+        type_root
+        and type_root not in _PRIMITIVE_TYPE_NAMES
+        and type_root[0].isupper()
+    ):
+        return True
+    return False
+
+
+def _is_sanitizer_call(node: ast.AST) -> bool:
+    """Return True if ``node`` is a call whose return value is considered safe."""
+    if not isinstance(node, ast.Call):
+        return False
+    name = _get_call_name(node)
+    if name in _SANITIZERS:
+        return True
+    return any(name.endswith(suffix) for suffix in _SANITIZER_METHOD_SUFFIXES)
+
+
+def _node_references_taint(node: ast.AST, tainted: set) -> bool:
+    """Check if an AST node's *value* should be considered tainted.
+
+    Sanitizer calls short-circuit propagation: ``shlex.quote(tainted)`` is
+    treated as untainted regardless of its argument.
+    """
+    if isinstance(node, ast.Name):
+        return node.id in tainted or node.id in _TAINT_SOURCES
+    if isinstance(node, ast.Attribute):
+        return _node_references_taint(node.value, tainted)
+    if isinstance(node, ast.Subscript):
+        return _node_references_taint(node.value, tainted)
+    if isinstance(node, ast.BinOp):
+        return _node_references_taint(node.left, tainted) or _node_references_taint(
+            node.right, tainted
+        )
+    if isinstance(node, ast.JoinedStr):
+        return any(_node_references_taint(v, tainted) for v in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return _node_references_taint(node.value, tainted)
+    if isinstance(node, ast.Call):
+        if _is_sanitizer_call(node):
+            return False
+        return any(_node_references_taint(a, tainted) for a in node.args)
+    return False
+
+
+def _expr_uses_name(node: ast.AST, name: str) -> bool:
+    """Return True if ``node`` references the identifier ``name`` anywhere."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id == name:
+            return True
+    return False
+
+
+def _get_call_name(node: ast.Call) -> str:
+    """Extract function name from an ast.Call node."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        parts = []
+        curr = node.func
+        while isinstance(curr, ast.Attribute):
+            parts.append(curr.attr)
+            curr = curr.value
+        if isinstance(curr, ast.Name):
+            parts.append(curr.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _function_initial_taints(
+    func: ast.AST,
+) -> Tuple[set, Dict[str, int]]:
+    """Compute the initial set of tainted parameter names for one function,
+    plus a mapping of each tainted positional parameter to its 0-based index.
+    """
+    tainted: set = set()
+    name_to_idx: Dict[str, int] = {}
+    args_list = list(func.args.args)
+    defaults = list(func.args.defaults)
+    offset = len(args_list) - len(defaults)
+    for i, arg in enumerate(args_list):
+        default = defaults[i - offset] if i >= offset else None
+        if _is_tainted_param(arg, default):
+            tainted.add(arg.arg)
+            name_to_idx[arg.arg] = i
+    for j, arg in enumerate(func.args.kwonlyargs):
+        kw_default = func.args.kw_defaults[j] if j < len(func.args.kw_defaults) else None
+        if _is_tainted_param(arg, kw_default):
+            tainted.add(arg.arg)
+    return tainted, name_to_idx
+
+
+def _function_all_params(func: ast.AST) -> Dict[str, int]:
+    """Map every positional parameter name to its 0-based index. Used for
+    wrapper-sink discovery (where ANY param flowing to a sink makes the
+    function dangerous, regardless of whether its name looks tainted)."""
+    return {arg.arg: i for i, arg in enumerate(func.args.args)}
+
+
+def _contributors_in(node: ast.AST, provenance: Dict[str, set]) -> set:
+    """Return the set of original parameter names whose taint propagates into
+    *node*. Honours sanitizer-call short-circuiting (mirrors the value-level
+    truthiness logic in ``_node_references_taint``)."""
+    if isinstance(node, ast.Call):
+        if _is_sanitizer_call(node):
+            return set()
+        result: set = set()
+        for arg in node.args:
+            result.update(_contributors_in(arg, provenance))
+        return result
+    if isinstance(node, ast.Name):
+        return set(provenance.get(node.id, ()))
+    if isinstance(node, ast.Attribute):
+        return _contributors_in(node.value, provenance)
+    if isinstance(node, ast.Subscript):
+        return _contributors_in(node.value, provenance)
+    if isinstance(node, ast.BinOp):
+        return _contributors_in(node.left, provenance) | _contributors_in(
+            node.right, provenance
+        )
+    if isinstance(node, ast.JoinedStr):
+        result = set()
+        for v in node.values:
+            result.update(_contributors_in(v, provenance))
+        return result
+    if isinstance(node, ast.FormattedValue):
+        return _contributors_in(node.value, provenance)
+    return set()
+
+
+def _build_provenance(func: ast.AST, all_params: Dict[str, int]) -> Dict[str, set]:
+    """Walk a function body in source order, building a map from each local
+    variable to the set of parameter names whose taint flows into it.
+
+    ``def foo(a, b): x = a + 1; y = x.upper()`` produces
+    ``{'a': {'a'}, 'b': {'b'}, 'x': {'a'}, 'y': {'a'}}``.
+    """
+    provenance: Dict[str, set] = {name: {name} for name in all_params}
+
+    def _walk(stmts):
+        for stmt in stmts:
+            if isinstance(stmt, ast.Assign):
+                contributors = _contributors_in(stmt.value, provenance)
+                if contributors:
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            provenance[target.id] = contributors
+            elif isinstance(stmt, ast.AugAssign):
+                if isinstance(stmt.target, ast.Name):
+                    contributors = _contributors_in(stmt.value, provenance)
+                    if contributors:
+                        provenance.setdefault(stmt.target.id, set()).update(contributors)
+            elif isinstance(stmt, ast.AnnAssign):
+                if (
+                    isinstance(stmt.target, ast.Name)
+                    and stmt.value is not None
+                ):
+                    contributors = _contributors_in(stmt.value, provenance)
+                    if contributors:
+                        provenance[stmt.target.id] = contributors
+            # Recurse into nested blocks, but skip nested function defs so
+            # their parameter scopes don't leak.
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for attr in ("body", "orelse", "finalbody"):
+                sub = getattr(stmt, attr, None)
+                if isinstance(sub, list):
+                    _walk(sub)
+            if isinstance(stmt, ast.Try):
+                for handler in stmt.handlers:
+                    _walk(handler.body)
+
+    _walk(func.body)
+    return provenance
+
+
 def _ast_analyze_python(source: str, filepath: str) -> List[Finding]:
-    """AST-based taint analysis for Python MCP server code."""
+    """AST-based taint analysis for Python MCP server code.
+
+    Implements per-function scoping, sanitizer recognition (so properly
+    escaped flows don't trigger), Pydantic / FastAPI parameter-source
+    detection, and one-level intra-file inter-procedural propagation: a
+    function that passes a parameter into a dangerous sink is registered
+    as a "wrapper sink" so call sites that pass tainted data to it also
+    fire.
+    """
     findings: List[Finding] = []
     try:
         tree = ast.parse(source, filename=filepath)
     except SyntaxError:
         return findings
 
-    # Collect tainted variable names (simplified data-flow)
+    all_funcs: List[ast.AST] = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+    # Module-level tainted vars seed: explicit names plus anything assigned
+    # from a known source at module scope.
     tainted_vars: set = set()
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    if _node_references_taint(node.value, tainted_vars):
-                        tainted_vars.add(target.id)
-        elif isinstance(node, ast.FunctionDef):
-            for arg in node.args.args:
-                if arg.arg in _TAINT_SOURCES:
-                    tainted_vars.add(arg.arg)
+                if isinstance(target, ast.Name) and _node_references_taint(node.value, tainted_vars):
+                    tainted_vars.add(target.id)
 
-    # Check if tainted data reaches dangerous sinks
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func_name = _get_call_name(node)
-            if func_name in _DANGEROUS_SINKS:
+    # Pass 1: per-function taint analysis. We track two related but distinct
+    # things:
+    #
+    #   * ``func_locals[func]`` — the set of variables tainted by an *entry*
+    #     source (heuristic-matched param names, Pydantic types, FastAPI
+    #     markers, ...) plus assignment-propagation from those. Used to emit
+    #     direct findings in Pass 2.
+    #
+    #   * ``wrapper_sinks`` — for any function, which positional parameters
+    #     (whether or not they're heuristically tainted) flow into a dangerous
+    #     sink. A function that satisfies this becomes a wrapper sink for
+    #     callers — i.e. ``def execute(cmd): os.system(cmd)`` makes any
+    #     caller passing tainted data on position 0 dangerous, regardless of
+    #     whether ``cmd`` matches a taint-source name pattern.
+    wrapper_sinks: Dict[str, Dict[int, Tuple[str, str]]] = {}
+    func_locals: Dict[ast.AST, set] = {}
+
+    for func in all_funcs:
+        entry_tainted, _entry_idx = _function_initial_taints(func)
+        all_params = _function_all_params(func)
+        provenance = _build_provenance(func, all_params)
+
+        # Entry-source taint propagation (for finding emission). Run
+        # alongside provenance — both rely on assignment order, but entry
+        # taint may include names from outside the param set.
+        entry_local = set(entry_tainted) | set(tainted_vars)
+        for node in ast.walk(func):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node is not func
+            ):
+                continue
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and _node_references_taint(
+                        node.value, entry_local
+                    ):
+                        entry_local.add(target.id)
+            elif isinstance(node, ast.AugAssign):
+                if isinstance(node.target, ast.Name) and _node_references_taint(
+                    node.value, entry_local
+                ):
+                    entry_local.add(node.target.id)
+        func_locals[func] = entry_local
+
+        # Wrapper-sink discovery: scan for sinks, attribute back to the
+        # original parameters via provenance.
+        for node in ast.walk(func):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node is not func
+            ):
+                continue
+            if isinstance(node, ast.Call):
+                call_name = _get_call_name(node)
+                cat_level = _DANGEROUS_SINKS.get(call_name)
+                if not cat_level:
+                    continue
                 for arg_node in node.args:
-                    if _node_references_taint(arg_node, tainted_vars):
-                        cat, level = _DANGEROUS_SINKS[func_name]
-                        findings.append(
-                            Finding(
-                                scanner="mcp_deep",
-                                level=level,
-                                title=f"[{cat}] " + t(f"污点数据流入 {func_name}()", f"Tainted data flows into {func_name}()"),
-                                detail=t(f"用户输入经数据流分析可达 {func_name}()，存在 {RISK_CATEGORIES.get(cat, cat)} 风险。", f"User input reaches {func_name}() via data-flow analysis, posing {RISK_CATEGORIES.get(cat, cat)} risk."),
-                                location=f"{filepath}:{getattr(node, 'lineno', '?')}",
-                                remediation=t(f"在调用 {func_name}() 前对输入做净化/白名单校验。", f"Sanitize/whitelist-validate input before calling {func_name}()."),
-                            )
-                        )
+                    contributors = _contributors_in(arg_node, provenance)
+                    for pname in contributors:
+                        pidx = all_params.get(pname)
+                        if pidx is not None:
+                            wrapper_sinks.setdefault(func.name, {})[pidx] = cat_level
 
-    # Detect @tool decorator with dynamic description
+    def _emit(level, cat, title, detail, node, remediation):
+        findings.append(
+            Finding(
+                scanner="mcp_deep",
+                level=level,
+                title=f"[{cat}] {title}",
+                detail=detail,
+                location=f"{filepath}:{getattr(node, 'lineno', '?')}",
+                remediation=remediation,
+            )
+        )
+
+    # Pass 2: at every call site (anywhere in the module), flag direct sinks
+    # and wrapper sinks that receive tainted data. We use each function's
+    # local taint set so we don't leak cross-function taint.
+    def _taints_at(call_node: ast.Call) -> set:
+        for func, local in func_locals.items():
+            if any(call_node is c for c in ast.walk(func)):
+                return local
+        return tainted_vars
+
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _get_call_name(node)
+        active_tainted = _taints_at(node)
+
+        # Direct dangerous sink
+        if call_name in _DANGEROUS_SINKS:
+            cat, level = _DANGEROUS_SINKS[call_name]
+            for arg_node in node.args:
+                if _node_references_taint(arg_node, active_tainted):
+                    _emit(
+                        level,
+                        cat,
+                        t(f"污点数据流入 {call_name}()", f"Tainted data flows into {call_name}()"),
+                        t(
+                            f"用户输入经数据流分析可达 {call_name}()，存在 {RISK_CATEGORIES.get(cat, cat)} 风险。",
+                            f"User input reaches {call_name}() via data-flow analysis, posing {RISK_CATEGORIES.get(cat, cat)} risk.",
+                        ),
+                        node,
+                        t(
+                            f"在调用 {call_name}() 前对输入做净化/白名单校验。",
+                            f"Sanitize/whitelist-validate input before calling {call_name}().",
+                        ),
+                    )
+                    break
+
+        # Wrapper sink (function defined in this file that passes its arg to a sink)
+        if call_name in wrapper_sinks:
+            for arg_idx, arg_node in enumerate(node.args):
+                if arg_idx not in wrapper_sinks[call_name]:
+                    continue
+                if not _node_references_taint(arg_node, active_tainted):
+                    continue
+                cat, level = wrapper_sinks[call_name][arg_idx]
+                _emit(
+                    level,
+                    cat,
+                    t(
+                        f"污点数据经包装函数 {call_name}() 流入 {cat} sink",
+                        f"Tainted data flows through wrapper {call_name}() into {cat} sink",
+                    ),
+                    t(
+                        f"调用 {call_name}() 时传入的污点参数会被该函数内部的危险调用消费。",
+                        f"The tainted argument passed to {call_name}() is consumed by a dangerous call inside that function.",
+                    ),
+                    node,
+                    t(
+                        f"在 {call_name}() 内部或调用前完成输入净化/白名单校验。",
+                        f"Sanitize/whitelist-validate input inside {call_name}() or before calling it.",
+                    ),
+                )
+                break
+
+    # @tool decorator with dynamic description (unchanged behavior)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for decorator in node.decorator_list:
                 if isinstance(decorator, ast.Call):
                     for kw in decorator.keywords:
@@ -473,41 +920,117 @@ def _ast_analyze_python(source: str, filepath: str) -> List[Finding]:
     return findings
 
 
-def _node_references_taint(node: ast.AST, tainted: set) -> bool:
-    """Check if an AST node references any tainted variable."""
-    if isinstance(node, ast.Name):
-        return node.id in tainted or node.id in _TAINT_SOURCES
-    if isinstance(node, ast.Attribute):
-        return _node_references_taint(node.value, tainted)
-    if isinstance(node, ast.Subscript):
-        return _node_references_taint(node.value, tainted)
-    if isinstance(node, ast.BinOp):
-        return _node_references_taint(node.left, tainted) or _node_references_taint(
-            node.right, tainted
-        )
-    if isinstance(node, ast.JoinedStr):
-        return any(_node_references_taint(v, tainted) for v in node.values)
-    if isinstance(node, ast.FormattedValue):
-        return _node_references_taint(node.value, tainted)
-    if isinstance(node, ast.Call):
-        return any(_node_references_taint(a, tainted) for a in node.args)
-    return False
+# ═══════════════════════════════════════════════════════════════════════════════
+# JS/TS taint analysis — file-local destructuring + aliased request inputs
+#
+# The universal regex patterns above only fire when a sink call literally
+# contains substrings like ``req.`` or ``body.``. Modern Express/Koa/Anthropic
+# SDK code routinely separates the binding from the use:
+#
+#     const { cmd } = req.body;
+#     exec(cmd);              // ← would be missed by raw-regex patterns
+#
+# This pre-scan extracts names bound from a request-like source and looks for
+# sinks that consume them. Lightweight (regex only) so we keep the
+# "no tree-sitter dependency" property of the engine.
+# ═══════════════════════════════════════════════════════════════════════════════
+_JS_REQUEST_SOURCES = (
+    r"req|request|ctx|context|event|payload|message|update"
+    r"|tool_input|tool_use|webhook|envelope"
+)
+_JS_DESTRUCTURE_RE = re.compile(
+    r"(?:const|let|var)\s*\{\s*([^}]+?)\s*\}\s*=\s*"
+    r"(?:[\w.]+\.)?(?:" + _JS_REQUEST_SOURCES + r"|body|params|query|args)\b",
+    re.I,
+)
+_JS_REQ_ASSIGN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:[\w.]+\.)?(?:" + _JS_REQUEST_SOURCES + r")(?:\.[\w$.]+)?\s*[;\n]",
+    re.I,
+)
+
+_JS_TAINT_SINKS = (
+    (
+        r"\b(?:child_process\.)?(?:exec(?:Sync)?|spawn(?:Sync)?|execFile(?:Sync)?)\s*\("
+        r"[^)]*\b(?:NAMES)\b",
+        "CMDI",
+        CRIT,
+        t("解构出的用户输入流入命令执行", "Destructured user input flows into command execution"),
+    ),
+    (
+        r"\b(?:eval|Function)\s*\([^)]*\b(?:NAMES)\b",
+        "RCE",
+        CRIT,
+        t("解构出的用户输入传入 eval/Function", "Destructured user input passed to eval/Function"),
+    ),
+    (
+        r"\b(?:fs\.)?(?:readFile(?:Sync)?|writeFile(?:Sync)?|createReadStream|createWriteStream)\s*\("
+        r"[^)]*\b(?:NAMES)\b",
+        "LFI",
+        HIGH,
+        t("解构出的用户输入控制文件读写路径", "Destructured user input controls file path"),
+    ),
+    (
+        r"\b(?:fetch|axios\.(?:get|post|put|delete|request)|http(?:s)?\.(?:get|request))\s*\("
+        r"[^)]*\b(?:NAMES)\b",
+        "SSRF",
+        HIGH,
+        t("解构出的用户输入控制 HTTP 请求目标", "Destructured user input controls HTTP request target"),
+    ),
+)
 
 
-def _get_call_name(node: ast.Call) -> str:
-    """Extract function name from an ast.Call node."""
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    if isinstance(node.func, ast.Attribute):
-        parts = []
-        curr = node.func
-        while isinstance(curr, ast.Attribute):
-            parts.append(curr.attr)
-            curr = curr.value
-        if isinstance(curr, ast.Name):
-            parts.append(curr.id)
-        return ".".join(reversed(parts))
-    return ""
+def _scan_js_destructured_taint(content: str, rel: str) -> List[Finding]:
+    """Catch sinks that consume request data through a local binding,
+    e.g. ``const { cmd } = req.body; exec(cmd)``."""
+    findings: List[Finding] = []
+    tainted: set = set()
+
+    for m in _JS_DESTRUCTURE_RE.finditer(content):
+        for raw in m.group(1).split(","):
+            piece = raw.strip()
+            if not piece:
+                continue
+            # Strip rest spread (``...rest`` → ``rest``).
+            piece = piece.lstrip(". ").strip()
+            # In ``name: alias`` syntax the alias (right side) is the real
+            # local binding. Default values (``name = 0``) follow it.
+            if ":" in piece:
+                piece = piece.split(":", 1)[1]
+            piece = piece.split("=", 1)[0].strip()
+            if piece and re.fullmatch(r"[A-Za-z_$][\w$]*", piece):
+                tainted.add(piece)
+
+    for m in _JS_REQ_ASSIGN_RE.finditer(content):
+        tainted.add(m.group(1))
+
+    if not tainted:
+        return findings
+
+    names_alt = "|".join(re.escape(n) for n in tainted)
+    for sink_template, cat, level, title in _JS_TAINT_SINKS:
+        sink_re = re.compile(sink_template.replace("NAMES", names_alt), re.I)
+        for match in sink_re.finditer(content):
+            lineno = content[: match.start()].count("\n") + 1
+            findings.append(
+                Finding(
+                    scanner="mcp_deep",
+                    level=level,
+                    title=f"[{cat}] {title}",
+                    detail=t(
+                        f"通过解构/赋值得到的字段进入危险调用，构成 {RISK_CATEGORIES.get(cat, cat)} 风险。",
+                        f"A field obtained via destructuring/assignment reaches a dangerous call, creating {RISK_CATEGORIES.get(cat, cat)} risk.",
+                    ),
+                    location=f"{rel}:{lineno}",
+                    snippet=match.group(0)[:80].strip(),
+                    remediation=t(
+                        "对来自请求对象的字段做白名单 / 类型 / schema 校验后再使用。",
+                        "Validate request-derived fields with an allowlist / type / schema before use.",
+                    ),
+                    metadata={"category": cat, "source": "js_destructure"},
+                )
+            )
+    return findings
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -560,6 +1083,24 @@ _SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "b
 _MAX_FILE_SIZE = 512 * 1024  # 512KB per file
 _REACT2SHELL_AFFECTED = {"react": ("19.0.0", "19.2.99"), "next": ("15.0.0", "15.0.4")}
 
+# Per-file auth-middleware indicators. If any of these match, we suppress
+# AUTHZ patterns flagged with ``suppress_if_auth_present=True`` for that file,
+# because the file demonstrably has *some* form of authentication wiring and
+# the per-route negative lookahead approach is too brittle to assert otherwise.
+_AUTH_INDICATORS = re.compile(
+    r"(?i)("
+    r"app\.use\s*\([^)]*(?:auth|passport|verify|jwt|session|require[A-Z]?[a-z]*(?:Auth|User|Login))"
+    r"|passport\.authenticate\s*\("
+    r"|verify(?:Token|Auth|JWT|Signature)\s*\("
+    r"|require(?:Auth|User|Login)\s*\("
+    r"|express(?:-|_)jwt|jwt-?middleware"
+    r"|fastapi[.]security|Depends\s*\([^)]*(?:auth|verify|current_user|get_user)"
+    r"|@(?:login_required|permission_required|auth_required|requires_auth|authenticated|protected)\b"
+    r"|HTTPBearer\s*\(|OAuth2PasswordBearer\s*\("
+    r"|@app\.middleware\s*\([\"']http[\"']\s*\)"
+    r")"
+)
+
 
 def scan_mcp_source(code_path: Path) -> List[Finding]:
     """
@@ -605,14 +1146,17 @@ def scan_mcp_source(code_path: Path) -> List[Finding]:
 
     for fp in code_files:
         try:
-            content = fp.read_text(errors="ignore")
+            content = fp.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
         files_scanned += 1
         rel = str(fp.relative_to(code_path)) if code_path.is_dir() else fp.name
+        has_auth_middleware = bool(_AUTH_INDICATORS.search(content))
 
         # 1) Universal regex patterns
         for pat in _MCP_PATTERNS:
+            if pat.suppress_if_auth_present and has_auth_middleware:
+                continue
             for match in pat.pattern.finditer(content):
                 lineno = content[: match.start()].count("\n") + 1
                 snippet = match.group(0)[:80].strip()
@@ -633,8 +1177,9 @@ def scan_mcp_source(code_path: Path) -> List[Finding]:
         if fp.suffix == ".py":
             findings.extend(_ast_analyze_python(content, rel))
 
-        # 3) JS/TS extra MCP patterns
+        # 3) JS/TS extra MCP patterns + destructuring taint
         if fp.suffix in (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"):
+            findings.extend(_scan_js_destructured_taint(content, rel))
             for pat in _JS_MCP_EXTRA_PATTERNS:
                 for match in pat.pattern.finditer(content):
                     lineno = content[: match.start()].count("\n") + 1

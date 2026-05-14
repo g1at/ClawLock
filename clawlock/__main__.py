@@ -1,4 +1,4 @@
-"""ClawLock v2.4.0 CLI - 12 commands."""
+"""ClawLock v2.5.0 CLI - 12 commands."""
 
 import asyncio
 import concurrent.futures
@@ -171,8 +171,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.4.0 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.4.0 - security scan and hardening for Claw platforms",
+        "ClawLock v2.5.0 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.5.0 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -681,18 +681,6 @@ def redteam(
 @app.command(name="mcp-scan", help=t("深度扫描 MCP 服务端源码", "Deep-scan MCP server source code."))
 def mcp_scan(
     code_path: Annotated[str, typer.Argument(help=t("MCP 服务端源码路径", "MCP server source path"))],
-    model: Annotated[
-        str, typer.Option("--model", help=t("ai-infra-guard 使用的 LLM 模型", "LLM model for ai-infra-guard"))
-    ] = "",
-    token: Annotated[
-        str,
-        typer.Option(
-            "--token", envvar="OPENAI_API_KEY", help=t("ai-infra-guard 的 API Key", "API key for ai-infra-guard")
-        ),
-    ] = "",
-    base_url: Annotated[
-        str, typer.Option("--base-url", help=t("自定义 API Base URL", "Custom API base URL"))
-    ] = "",
     no_pkg_check: Annotated[
         bool,
         typer.Option(
@@ -712,7 +700,7 @@ def mcp_scan(
         _os.environ["CLAWLOCK_NO_PKG_CHECK"] = "1"
     p = Path(code_path).expanduser()
     console.print(f"[cyan]{t('MCP 深度扫描', 'MCP Deep Scan')}[/cyan]  path={p}")
-    findings = run_mcp_deep_scan(p, model, token, base_url)
+    findings = run_mcp_deep_scan(p)
     for f in findings:
         console.print(f"  {_tag(f.level)} {f.title}")
         if f.detail:
@@ -937,7 +925,6 @@ def version(
     ] = None,
 ):
     """Show version info."""
-    from .integrations import _ext_version
     from .updates import build_update_report, render_update_report_json, render_update_report_text
     from .utils import platform_label
 
@@ -956,7 +943,6 @@ def version(
     console.print(f"ClawLock v[bold]{__version__}[/bold]")
     console.print("[dim]https://github.com/g1at/clawlock[/dim]")
     console.print(f"[dim]{t('平台', 'Platform')}: {platform_label()}[/dim]")
-    console.print(f"[dim]{t('外部扫描器', 'External scanner')}: {_ext_version()}[/dim]")
 
 
 if __name__ == "__main__":

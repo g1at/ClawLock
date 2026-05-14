@@ -346,7 +346,7 @@ def scan_agent_code(code_path: Path) -> List[Finding]:
 
     for file_path in files:
         try:
-            content = file_path.read_text(errors="ignore")
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
 
@@ -586,7 +586,7 @@ def scan_agent(
         code_text = ""
         if code_path and code_path.exists():
             if code_path.is_file():
-                code_text = code_path.read_text(errors="ignore")
+                code_text = code_path.read_text(encoding="utf-8", errors="ignore")
             else:
                 for file_path in sorted(code_path.rglob("*"))[:10]:
                     if not file_path.is_file():
@@ -595,7 +595,7 @@ def scan_agent(
                         continue
                     code_text += (
                         f"\n--- {file_path.name} ---\n"
-                        + file_path.read_text(errors="ignore")[:2000]
+                        + file_path.read_text(encoding="utf-8", errors="ignore")[:2000]
                     )
         elif config:
             code_text = json.dumps(

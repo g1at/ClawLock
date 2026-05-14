@@ -1,16 +1,17 @@
 ﻿"""
-ClawLock v2.4.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.5.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
 
 from __future__ import annotations
+import ast
 import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from ..adapters import AdapterSpec, load_config, run_cmd
 from ..i18n import t
 
@@ -385,39 +386,60 @@ def _get_nested(d: dict, dotpath: str):
 _MAX_NESTED_DEPTH = 50  # caps recursive walks; legit configs are <10 deep
 
 
-# ── BIP39 / wallet mnemonic heuristic ────────────────────────────────────────
-# A run of 12, 18, or 24 short lowercase words separated by single spaces is
-# strongly suggestive of a BIP39 mnemonic phrase. Common English connectors
-# ("the", "and", "for", ...) virtually never appear in BIP39, so their
-# presence in the matched span is a strong negative signal.
+# ── BIP39 / wallet mnemonic detector ─────────────────────────────────────────
+# A real BIP39 mnemonic is exactly 12 / 15 / 18 / 21 / 24 words, each drawn
+# from the standardised 2048-word BIP39 English wordlist. We require every
+# matched word to be in the wordlist — typos invalidate the BIP39 checksum
+# anyway, so a "near-match" mnemonic is not a real threat, while strict
+# membership eliminates almost all prose false positives.
 _MNEMONIC_RE = re.compile(
     r"\b(?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8}\b"
 )
-_PROSE_INDICATORS = frozenset({
-    "the", "and", "but", "for", "with", "this", "that", "from", "into",
-    "your", "have", "has", "are", "was", "were", "you", "they", "them",
-    "their", "our", "his", "her", "not", "all", "any", "may", "can", "will",
-    "would", "could", "should", "use", "used", "uses", "via", "per",
-})
+_BIP39_VALID_LENGTHS = frozenset({12, 15, 18, 21, 24})
+
+_BIP39_WORDLIST: Optional[frozenset] = None
+
+
+def _load_bip39_wordlist() -> frozenset:
+    """Lazy-load the BIP39 English wordlist shipped beside this module."""
+    global _BIP39_WORDLIST
+    if _BIP39_WORDLIST is not None:
+        return _BIP39_WORDLIST
+    try:
+        path = Path(__file__).parent / "bip39_english.txt"
+        _BIP39_WORDLIST = frozenset(
+            w.strip().lower()
+            for w in path.read_text(encoding="utf-8").splitlines()
+            if w.strip()
+        )
+    except Exception:
+        _BIP39_WORDLIST = frozenset()
+    return _BIP39_WORDLIST
 
 
 def _looks_like_mnemonic(text: str) -> bool:
     """Return True when *text* contains a plausible BIP39 mnemonic span.
 
-    Heuristic: a span of exactly 12, 18, or 24 short lowercase words
-    separated by single spaces, with no common English connectors. Real
-    BIP39 phrases can legitimately repeat words (the canonical test vector
-    has 11 ``abandon`` + 1 ``about``) so we do not require uniqueness.
+    A span qualifies only when:
+      1. It contains 12 / 15 / 18 / 21 / 24 short lowercase words separated
+         by single spaces (the five BIP39-permitted lengths).
+      2. Every word is a member of the BIP39 English wordlist.
+
+    Real mnemonics repeat words freely (the canonical test vector is 11×
+    ``abandon`` + 1× ``about``), so uniqueness is intentionally not required.
     """
     match = _MNEMONIC_RE.search(text)
     if not match:
         return False
     words = match.group(0).split()
-    if len(words) not in (12, 18, 24):
+    if len(words) not in _BIP39_VALID_LENGTHS:
         return False
-    if any(w in _PROSE_INDICATORS for w in words):
+    wordlist = _load_bip39_wordlist()
+    if not wordlist:
+        # Wordlist file missing (e.g. broken install) — bail rather than
+        # fall back to a weak heuristic that produces false positives.
         return False
-    return True
+    return all(w in wordlist for w in words)
 
 
 def _check_mnemonic(obj: Any, path: str, depth: int = 0) -> List[Finding]:
@@ -691,7 +713,7 @@ def discover_installations() -> List[Finding]:
     from ..utils import find_all_binaries
 
     bins = find_all_binaries(
-        ["openclaw", "zeroclaw", "claude", "ai-infra-guard", "promptfoo", "npx"]
+        ["openclaw", "zeroclaw", "claude", "promptfoo", "npx"]
     )
     for name, path in bins.items():
         if path:
@@ -1286,6 +1308,53 @@ def _is_comment_line(line: str) -> bool:
     return bool(_COMMENT_RE.match(line))
 
 
+# Categories that should still fire on lines that are purely inside a string
+# literal (e.g. docstrings, triple-quoted comment blocks). Code-focused
+# categories like RCE/EXECUTION/NETWORK are suppressed there because the
+# string body is documentation, not executable code — but prompt injection,
+# credentials, obfuscation, and mnemonic content embedded in a string ARE
+# still meaningful threats and continue to fire.
+_STRING_SAFE_CATEGORIES = frozenset({
+    "INJECTION",
+    "OBFUSCATION",
+    "CREDENTIAL",
+    "WALLET",
+})
+
+
+def _python_docstring_line_set(content: str) -> Set[int]:
+    """Return 1-based line numbers that fall inside a Python bare-string
+    expression (typically a module / class / function docstring or a
+    triple-quoted comment block).
+
+    Only standalone string-expression statements are masked. Embedded string
+    literals inside other expressions — e.g. ``eval("…")`` or ``f"{x}"`` on
+    the same line as a call — are intentionally NOT masked, so executable
+    code on those lines is still scanned normally.
+    """
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return set()
+
+    doc_lines: Set[int] = set()
+    for node in ast.walk(tree):
+        for attr in ("body", "orelse", "finalbody"):
+            body = getattr(node, attr, None)
+            if not isinstance(body, list):
+                continue
+            for stmt in body:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    start = stmt.lineno
+                    end = getattr(stmt, "end_lineno", None) or start
+                    doc_lines.update(range(start, end + 1))
+    return doc_lines
+
+
 def scan_skill(skill_path: Path) -> List[Finding]:
     findings: List[Finding] = []
     skill_name = skill_path.stem if skill_path.is_file() else skill_path.name
@@ -1316,6 +1385,9 @@ def scan_skill(skill_path: Path) -> List[Finding]:
             content = f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
+        py_doc_lines: Set[int] = (
+            _python_docstring_line_set(content) if f.suffix == ".py" else set()
+        )
         for i, line in enumerate(content.splitlines(), 1):
             # Build candidate lines: original + any unwrapped shell payloads
             candidates = [line]
@@ -1323,10 +1395,17 @@ def scan_skill(skill_path: Path) -> List[Finding]:
             candidates.extend(unwrapped)
             is_deobfuscated = False
             is_comment = _is_comment_line(line)
+            in_py_docstring = i in py_doc_lines
             for candidate in candidates:
                 for compiled_pat, level, title, detail, category in _COMPILED_MALICIOUS_PATTERNS:
                     # Skip non-CRIT patterns on comment lines to reduce false positives
                     if is_comment and level != CRIT:
+                        continue
+                    # Skip code-focused categories inside Python docstrings —
+                    # they're documentation, not executable code. Threats that
+                    # CAN actually live in a string body (prompt injection,
+                    # credentials, obfuscation, mnemonics) still fire.
+                    if in_py_docstring and category not in _STRING_SAFE_CATEGORIES:
                         continue
                     if compiled_pat.search(candidate):
                         key = f"{compiled_pat.pattern}:{f}:{i}"

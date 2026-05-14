@@ -9,7 +9,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.4.0"
+    version: "2.5.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -466,7 +466,6 @@ clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 ```
 
 > **依赖说明：** 除 `clawlock redteam` 需要 Node.js，并通过 `promptfoo` 或 `npx` 运行外，所有其他命令仅需 `pip install clawlock`，零外部二进制依赖。
-> `ai-infra-guard` 目前仅作为 `mcp-scan` 的可选增强，且只有在系统中安装了该二进制并显式传入 `--model` 与 `--token` 时才会启用。
 
 ---
 
@@ -588,6 +587,6 @@ clawlock watch --count 10         # 扫描 10 轮后自动停止
 - 执行真实攻击或确认漏洞可利用性
 - 读取系统隐私目录、会话记录、媒体文件
 
-v1.1 起，MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + AST 污点追踪），无需安装 ai-infra-guard 二进制。内建引擎基于已知模式匹配，对复杂的跨函数语义漏洞覆盖有限；如需 LLM 驱动的语义级分析，可通过 `--llm` 选项启用（需要 API key）。
+MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + AST 污点追踪），零外部二进制依赖。内建引擎基于已知模式匹配，对复杂的跨函数语义漏洞覆盖有限；如需 LLM 驱动的语义级分析，可通过 `--llm` 选项启用（需要 API key）。
 
 所有结论均为「当前检查范围内」的最佳评估。
