@@ -14,7 +14,7 @@ def test_mcp_live_requires_existing_config():
     result = runner.invoke(app, ["mcp-live", "missing-mcp.json"])
 
     assert result.exit_code == 2
-    assert "Path does not exist" in result.stderr
+    assert "Path does not exist" in result.output
 
 
 def test_mcp_live_does_not_start_stdio_without_execute(tmp_path):
@@ -91,7 +91,7 @@ def test_dynamic_scan_requires_existing_target():
     )
 
     assert result.exit_code == 2
-    assert "Path does not exist" in result.stderr
+    assert "Path does not exist" in result.output
 
 
 def test_dynamic_scan_is_blocked_without_consent(tmp_path):

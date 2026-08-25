@@ -28,7 +28,7 @@ def test_cli_rejects_unsupported_choice_values(args):
     result = runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert "Unsupported value" in result.stderr
+    assert "Unsupported value" in result.output
 
 
 @pytest.mark.parametrize(
@@ -50,7 +50,7 @@ def test_explicit_missing_input_paths_exit_two(args):
     result = runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert "Path does not exist" in result.stderr
+    assert "Path does not exist" in result.output
 
 
 def test_agent_scan_rejects_invalid_json_config(tmp_path):
@@ -62,7 +62,7 @@ def test_agent_scan_rejects_invalid_json_config(tmp_path):
     result = runner.invoke(app, ["agent-scan", "--config", str(config)])
 
     assert result.exit_code == 2
-    assert "Could not read valid JSON config" in result.stderr
+    assert "Could not read valid JSON config" in result.output
 
 
 def test_redteam_requires_positive_test_count():
@@ -74,7 +74,7 @@ def test_redteam_requires_positive_test_count():
     )
 
     assert result.exit_code == 2
-    assert "Number of tests must be greater than 0" in result.stderr
+    assert "Number of tests must be greater than 0" in result.output
 
 
 def test_requested_redteam_skip_is_incomplete(monkeypatch):
@@ -373,7 +373,7 @@ def test_watch_rejects_invalid_ranges(args, error_text):
     result = runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert error_text in result.stderr
+    assert error_text in result.output
 
 
 def test_watch_reports_finding_transitions(monkeypatch):
