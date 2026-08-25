@@ -1,4 +1,4 @@
-﻿"""ClawLock v2.5.0 report renderer - Rich terminal + JSON + HTML output."""
+﻿"""ClawLock v2.6.0 report renderer - Rich terminal + JSON + HTML output."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from rich.console import Console
 from rich.text import Text
 
+from .. import __version__
 from ..i18n import current_lang, t
 from ..scanners import CRIT, HIGH, INFO, WARN, Finding
 
@@ -45,6 +46,8 @@ _SCANNER_TO_DOMAIN: Dict[str, str] = {
     "mcp_deep": t("MCP 安全", "MCP Security"),
     "cve": t("漏洞管理", "Vulnerability Mgmt"),
     "agent_scan": t("Agent 安全", "Agent Security"),
+    "agent_scan_llm": t("Agent 安全", "Agent Security"),
+    "redteam": t("Agent 安全", "Agent Security"),
 }
 
 # All possible domains in display order, with weights.
@@ -179,6 +182,53 @@ def _active_domains_from_findings_map(
     return active_domains
 
 
+def _is_scan_diagnostic(finding: Finding) -> bool:
+    metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
+    status = metadata.get("scan_status")
+    explicitly_requested_skip = status == "skipped" and metadata.get("requested") is True
+    return (
+        finding.scanner == "internal"
+        or status == "error"
+        or explicitly_requested_skip
+    )
+
+
+def _scan_diagnostics(
+    all_findings_map: Dict[str, List[Finding]],
+) -> List[dict]:
+    """Return tool failures separately from security findings."""
+    diagnostics: List[dict] = []
+    for label, findings in all_findings_map.items():
+        for finding in findings:
+            if not _is_scan_diagnostic(finding):
+                continue
+            diagnostics.append(
+                {
+                    "check": str(label),
+                    "level": finding.level,
+                    "title": finding.title,
+                    "detail": finding.detail,
+                    "remediation": finding.remediation,
+                    "metadata": finding.metadata or {},
+                }
+            )
+    return diagnostics
+
+
+def _failed_domains_from_findings_map(
+    all_findings_map: Dict[str, List[Finding]],
+) -> Set[str]:
+    """Map failed scan checks to domains whose score is not trustworthy."""
+    failed_domains: Set[str] = set()
+    for label, findings in all_findings_map.items():
+        if not any(_is_scan_diagnostic(finding) for finding in findings):
+            continue
+        domain = _CHECK_LABEL_TO_DOMAIN.get(label)
+        if domain:
+            failed_domains.add(domain)
+    return failed_domains
+
+
 def _build_domain_report(
     all_findings: List[Finding],
     *,
@@ -191,11 +241,11 @@ def _build_domain_report(
     # Internal/tool-error findings are surfaced in the report but must not
     # affect the security score — a scanner crash is about the tool, not the
     # system being scanned.
-    accountable = [f for f in all_findings if f.scanner != "internal"]
+    accountable = [f for f in all_findings if not _is_scan_diagnostic(f)]
 
     domain_findings: Dict[str, List[Finding]] = {d: [] for d in _ALL_DOMAINS}
     for f in accountable:
-        domain = _SCANNER_TO_DOMAIN.get(f.scanner, t("配置安全", "Config Security"))
+        domain = _SCANNER_TO_DOMAIN.get(f.scanner)
         if domain in domain_findings:
             domain_findings[domain].append(f)
 
@@ -275,7 +325,7 @@ def _finding_level_style(level: str) -> str:
 def _findings_tone(findings: List[Finding]) -> str:
     if any(f.level in (CRIT, HIGH) for f in findings):
         return "risk"
-    if any(f.level == WARN for f in findings):
+    if any(f.level == WARN or _is_scan_diagnostic(f) for f in findings):
         return "review"
     return "pass"
 
@@ -407,9 +457,14 @@ def render_scan_report(
     output_path: Optional[str] = None,
 ):
     """Render scan results in text, JSON, or HTML."""
+    if output_format not in {"text", "json", "html"}:
+        raise ValueError(f"Unsupported output format: {output_format}")
     scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_f = [f for fs in all_findings_map.values() for f in fs]
     active_domains = _active_domains_from_findings_map(all_findings_map)
+    diagnostics = _scan_diagnostics(all_findings_map)
+    failed_domains = _failed_domains_from_findings_map(all_findings_map)
+    complete = not diagnostics
     n_crit = sum(1 for f in all_f if f.level == CRIT)
     n_high = sum(1 for f in all_f if f.level == HIGH)
     nc = n_crit + n_high  # combined for scoring compatibility
@@ -431,19 +486,36 @@ def render_scan_report(
         if ids:
             entry["measure_ids"] = list(ids)
         findings_summary.append(entry)
-    record_scan(adapter_name, score, nc, nw, len(all_f), findings_summary)
+    record_scan(
+        adapter_name,
+        score if complete else None,
+        nc,
+        nw,
+        len(all_f),
+        findings_summary,
+        complete=complete,
+        status="complete" if complete else "incomplete",
+        partial_score=score if not complete else None,
+    )
 
     if output_format == "json":
+        reported_domain_grades = dict(domain_grades)
+        reported_domain_scores: Dict[str, Optional[int]] = dict(domain_scores)
+        for domain in failed_domains:
+            reported_domain_grades[domain] = "INCOMPLETE"
+            reported_domain_scores[domain] = None
         out = {
             "tool": "ClawLock",
-            "version": "2.5.0",
+            "version": __version__,
             "time": scan_time,
             "adapter": adapter_name,
             "device": dev_fp,
-            "score": score,
-            "grade": overall_grade,
-            "domain_grades": domain_grades,
-            "domain_scores": domain_scores,
+            "complete": complete,
+            "diagnostics": diagnostics,
+            "score": score if complete else None,
+            "grade": overall_grade if complete else "INCOMPLETE",
+            "domain_grades": reported_domain_grades,
+            "domain_scores": reported_domain_scores,
             "findings": [
                 {
                     "scanner": f.scanner,
@@ -451,11 +523,16 @@ def render_scan_report(
                     "title": f.title,
                     "detail": f.detail,
                     "location": f.location,
+                    "snippet": f.snippet,
                     "remediation": f.remediation,
+                    "metadata": f.metadata or {},
                 }
                 for f in all_f
             ],
         }
+        if not complete:
+            out["partial_score"] = score
+            out["partial_grade"] = overall_grade
         text = json.dumps(out, ensure_ascii=False, indent=2)
         if output_path:
             Path(output_path).write_text(text, encoding="utf-8")
@@ -474,7 +551,8 @@ def render_scan_report(
         )
         return
 
-    grade_style = _GRADE_STYLES.get(overall_grade, "bold red")
+    display_grade = overall_grade if complete else t("不完整", "INCOMPLETE")
+    grade_style = _GRADE_STYLES.get(display_grade, "bold yellow")
     sc_color = "red" if score < 60 else ("yellow" if score < 80 else "green")
 
     _print_section(f"# {t('ClawLock 安全报告', 'ClawLock Security Report')}")
@@ -487,10 +565,13 @@ def render_scan_report(
     )
     score_line = Text()
     score_line.append(f"{t('评分', 'Score')}: ", style="bold")
-    score_line.append(f"{score}/100", style=f"bold {sc_color}")
+    if complete:
+        score_line.append(f"{score}/100", style=f"bold {sc_color}")
+    else:
+        score_line.append(t("不可用（扫描不完整）", "N/A (scan incomplete)"), style="bold yellow")
     score_line.append("   ")
     score_line.append(f"{t('等级', 'Grade')}: ", style="bold")
-    score_line.append(overall_grade, style=grade_style)
+    score_line.append(display_grade, style=grade_style)
     score_line.append("   ")
     score_line.append(f"{t('严重', 'Crit')}: ", style="bold")
     score_line.append(str(n_crit), style="bold bright_red")
@@ -501,20 +582,42 @@ def render_scan_report(
     score_line.append(f"{t('警告', 'Warn')}: ", style="bold")
     score_line.append(str(nw), style="bold yellow")
     console.print(score_line)
-    console.print(f"{t('评分条', 'Score Bar')}: ", end="")
-    console.print(_score_bar(score))
+    if complete:
+        console.print(f"{t('评分条', 'Score Bar')}: ", end="")
+        console.print(_score_bar(score))
+    else:
+        console.print(
+            Text(
+                t(
+                    f"扫描未完整执行；已完成部分的暂定分数为 {score}/100，不代表完整安全评级。",
+                    f"The scan did not complete; the partial score is {score}/100 and is not a complete security rating.",
+                ),
+                style="bold yellow",
+            )
+        )
+        for diagnostic in diagnostics:
+            console.print(
+                Text(
+                    f"- [{diagnostic['check']}] {diagnostic['title']}: {diagnostic['detail']}",
+                    style="yellow",
+                )
+            )
 
     _print_section(f"## {t('安全域评级', 'Security Domain Grades')}")
     for domain in _ALL_DOMAINS:
         if active_domains and domain not in active_domains:
             continue
         findings = domain_findings[domain]
-        grade = domain_grades[domain]
+        failed = domain in failed_domains
+        grade = t("不完整", "INCOMPLETE") if failed else domain_grades[domain]
         crit_count, high_count, warn_count, _ = _severity_counts(findings)
         line = Text()
         line.append(f"- {domain}: ", style="default")
         line.append(grade, style=_GRADE_STYLES.get(grade, "dim"))
-        line.append(f"  {domain_scores[domain]}/100", style="bold")
+        line.append(
+            f"  {t('不可用', 'N/A') if failed else f'{domain_scores[domain]}/100'}",
+            style="bold",
+        )
         if crit_count:
             line.append(f"  {t('严重', 'Crit')} {crit_count}", style="bright_red")
         if high_count:
@@ -578,6 +681,9 @@ def _render_html(
     """Generate a modern standalone HTML report with dark mode support."""
     all_f = [f for fs in all_findings_map.values() for f in fs]
     active_domains = _active_domains_from_findings_map(all_findings_map)
+    diagnostics = _scan_diagnostics(all_findings_map)
+    failed_domains = _failed_domains_from_findings_map(all_findings_map)
+    complete = not diagnostics
     domain_grades, domain_findings, domain_scores, overall_grade, score = (
         _build_domain_report(all_f, active_domains=active_domains)
     )
@@ -585,18 +691,21 @@ def _render_html(
     n_high = sum(1 for f in all_f if f.level == HIGH)
     nw = sum(1 for f in all_f if f.level == WARN)
 
-    sc = _GRADE_HTML_COLORS.get(overall_grade, "#e24b4a")
-    angle = int(score * 3.6)
+    display_grade = overall_grade if complete else t("不完整", "Incomplete")
+    display_score = str(score) if complete else "—"
+    sc = _GRADE_HTML_COLORS.get(overall_grade, "#e24b4a") if complete else "#ef9f27"
+    angle = int(score * 3.6) if complete else 0
 
     # Build domain cards
     domain_cards: List[str] = []
     for domain in _ALL_DOMAINS:
         if active_domains and domain not in active_domains:
             continue
-        g = domain_grades[domain]
+        failed = domain in failed_domains
+        g = t("不完整", "Incomplete") if failed else domain_grades[domain]
         dfs = domain_findings[domain]
         ds = domain_scores[domain]
-        g_color = _GRADE_HTML_COLORS.get(g, "#888")
+        g_color = "#b45309" if failed else _GRADE_HTML_COLORS.get(g, "#888")
         dc = sum(1 for f in dfs if f.level == CRIT)
         dh = sum(1 for f in dfs if f.level == HIGH)
         dw = sum(1 for f in dfs if f.level == WARN)
@@ -605,14 +714,18 @@ def _render_html(
             stats_parts.append(f'{dc} {t("严重", "crit")}')
         if dh:
             stats_parts.append(f'{dh} {t("高危", "high")}')
-        stats_parts.append(f'{dw} {t("警告", "warn")}')
+        if failed:
+            stats_parts.append(t("该安全域未完整执行", "This domain did not complete"))
+        else:
+            stats_parts.append(f'{dw} {t("警告", "warn")}')
         domain_cards.append(
             f'<div class="domain-card" style="border-left:4px solid {g_color}">'
             f'<div class="domain-header">'
             f'<span class="domain-name">{html_mod.escape(domain)}</span>'
             f'<span class="domain-grade" style="color:{g_color}">{g}</span>'
             f'</div>'
-            f'<div class="domain-score" style="color:{g_color}">{ds}/100</div>'
+            f'<div class="domain-score" style="color:{g_color}">'
+            f'{t("不可用", "N/A") if failed else f"{ds}/100"}</div>'
             f'<div class="domain-stats">{" · ".join(stats_parts)}</div>'
             f'</div>'
         )
@@ -655,10 +768,31 @@ def _render_html(
         )
     findings_html = "\n".join(findings_parts)
 
+    diagnostics_html = ""
+    if diagnostics:
+        diagnostic_items = "".join(
+            "<li>"
+            f"<strong>{html_mod.escape(str(item['check']))}</strong>: "
+            f"{html_mod.escape(str(item['title']))} — "
+            f"{html_mod.escape(str(item['detail']))}"
+            "</li>"
+            for item in diagnostics
+        )
+        diagnostics_html = (
+            '<section class="diagnostics" role="alert" aria-labelledby="scan-status-title">'
+            f'<h2 id="scan-status-title">{t("扫描不完整", "Scan incomplete")}</h2>'
+            f'<p>{t("以下检查未能完成，因此本报告不提供完整安全评级。", "The following checks did not complete, so this report does not provide a complete security rating.")}</p>'
+            f"<ul>{diagnostic_items}</ul>"
+            "</section>"
+        )
+
     _title = t("ClawLock 安全报告", "ClawLock Security Report")
     _lbl_domains = t("安全域评级", "Security Domains")
     _lbl_findings = t("详细发现", "Detailed Findings")
-    _footer1 = t("由 ClawLock v2.5.0 生成", "Generated by ClawLock v2.5.0")
+    _footer1 = t(
+        f"由 ClawLock v{__version__} 生成",
+        f"Generated by ClawLock v{__version__}",
+    )
     _footer2 = t("静态分析仅反映当前可见的代码和配置。",
                   "Static analysis reflects the currently visible code and config only.")
 
@@ -735,6 +869,11 @@ h3 {{ font-size: 15px; font-weight: 600; margin: 20px 0 8px;
 .badge-high {{ background: #e24b4a; }}
 .badge-warn {{ background: #ef9f27; }}
 .badge-info {{ background: #888; }}
+.diagnostics {{ margin: 0 0 24px; padding: 16px 20px; border: 2px solid #b45309;
+                border-radius: 10px; background: var(--card-bg); }}
+.diagnostics h2 {{ color: #b45309; margin: 0 0 8px; }}
+.diagnostics p {{ margin-bottom: 8px; }}
+.diagnostics ul {{ padding-left: 20px; }}
 .footer {{ margin-top: 40px; padding: 20px; background: var(--card-bg); border-radius: 12px;
           font-size: 13px; color: var(--text-dim); text-align: center;
           box-shadow: var(--card-shadow); }}
@@ -746,8 +885,8 @@ h3 {{ font-size: 15px; font-weight: 600; margin: 20px 0 8px;
 <div class="header">
   <div class="score-circle">
     <div class="score-inner">
-      <span class="score-num">{score}</span>
-      <span class="score-grade">{overall_grade}</span>
+      <span class="score-num">{display_score}</span>
+      <span class="score-grade">{display_grade}</span>
     </div>
   </div>
   <div>
@@ -760,6 +899,8 @@ h3 {{ font-size: 15px; font-weight: 600; margin: 20px 0 8px;
     </div>
   </div>
 </div>
+
+{diagnostics_html}
 
 <h2>{t('📊', '📊')} {_lbl_domains}</h2>
 <div class="domain-grid">

@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.5.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.6.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -75,6 +75,19 @@ class ConfigRule:
     adapters: List[str] = field(default_factory=list)  # empty == universal
     measure_ids: List[str] = field(default_factory=list)
     asi: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SkillPatternRule:
+    """Typed rule for new Skill detectors with stable machine metadata."""
+
+    rule_id: str
+    pattern: str
+    level: str
+    title: str
+    detail: str
+    category: str
+    confidence: str = "high"
 
 
 _ERROR_LOG_MAX_BYTES = 1024 * 1024  # 1 MiB before rotation
@@ -385,6 +398,103 @@ def _get_nested(d: dict, dotpath: str):
 
 _MAX_NESTED_DEPTH = 50  # caps recursive walks; legit configs are <10 deep
 
+# Shared limits for untrusted Skill packages.  Track B demonstrated the value
+# of scanning extensionless/unusual text files, but its prototype sliced only
+# after ``read_text()`` and therefore still loaded an entire oversized file.
+# The mainline implementation performs bounded binary reads instead.
+_SKILL_MAX_FILE_BYTES = 2 * 1024 * 1024
+_SKILL_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+_SKILL_MAX_FILES = 2000
+_SKILL_MAX_LINE_CHARS = 4_096
+_SKILL_PRUNED_DIRS = frozenset(
+    {".git", "node_modules", "__pycache__", ".venv", "venv"}
+)
+_SKILL_BINARY_EXTENSIONS = frozenset(
+    {
+        ".7z",
+        ".a",
+        ".avi",
+        ".bin",
+        ".bmp",
+        ".bz2",
+        ".class",
+        ".dat",
+        ".db",
+        ".dll",
+        ".dylib",
+        ".eot",
+        ".exe",
+        ".flac",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jar",
+        ".jpeg",
+        ".jpg",
+        ".mkv",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".node",
+        ".o",
+        ".ogg",
+        ".otf",
+        ".pdf",
+        ".png",
+        ".pyc",
+        ".pyo",
+        ".rar",
+        ".so",
+        ".sqlite",
+        ".tar",
+        ".tgz",
+        ".ttf",
+        ".wav",
+        ".wasm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xz",
+        ".zip",
+    }
+)
+_SKILL_BINARY_MAGIC_PREFIXES = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"\x1f\x8b",
+    b"BZh",
+    b"\xfd7zXZ\x00",
+    b"7z\xbc\xaf'\x1c",
+    b"Rar!\x1a\x07",
+    b"\x7fELF",
+    b"MZ",
+    b"SQLite format 3\x00",
+    b"\x00asm",
+    b"\xca\xfe\xba\xbe",
+    b"OTTO",
+    b"wOFF",
+    b"wOF2",
+    b"BM",
+    b"ID3",
+    b"fLaC",
+    b"OggS",
+    b"RIFF",
+)
+_SKILL_LONG_LINE_ANCHOR_RE = re.compile(
+    r"(?i)(?:https?://|curl|wget|powershell|invoke-|\biex\b|\bnc\b|netcat|"
+    r"/dev/tcp|socket|subprocess|\brm\b|sudoers|authorized_keys|ld\.so\.preload|"
+    r"/etc/passwd|\beval\b|\bexec\b|deserialize|unserialize|jsonpickle|"
+    r"systemctl|crontab|schtasks|launchctl|token|secret|password|api[_-]?key|"
+    r"base64|chmod|mkfs|tool_call|function_call|\bmcp\b|jailbreak|"
+    r"ignore\s+(?:all\s+)?(?:previous|above))"
+)
+
 
 # ── BIP39 / wallet mnemonic detector ─────────────────────────────────────────
 # A real BIP39 mnemonic is exactly 12 / 15 / 18 / 21 / 24 words, each drawn
@@ -598,7 +708,10 @@ def _parse_native_audit_findings(output: str, location: str) -> List[Finding]:
 
 def scan_config(adapter: AdapterSpec) -> Tuple[List[Finding], Optional[str]]:
     findings: List[Finding] = []
-    config, cfg_path = load_config(adapter)
+    # A malformed config must fail the scan domain instead of becoming an
+    # empty configuration that scores as clean.  The orchestrator converts
+    # this exception into an explicit incomplete-scan diagnostic.
+    config, cfg_path = load_config(adapter, strict=True)
     if adapter.audit_cmd:
         code, out, err = run_cmd(adapter.audit_cmd)
         if code == 0 and out:
@@ -1039,9 +1152,9 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "(?i)(?:~?/\\.config/systemd/user|systemctl\\s+--user\\s+(?:enable|start))",
-        HIGH,
+        WARN,
         t("用户级 systemd 持久化", "User-level systemd persistence"),
-        t("通过用户级 systemd 单元注册持久化任务。", "Registers persistence through user-level systemd units."),
+        t("检测到用户级 systemd 单元操作；需结合远程载荷或隐蔽执行上下文判断风险。", "Detected a user-level systemd unit operation; assess it together with remote-payload or covert-execution context."),
     ),
     (
         "(?i)(?:~?/\\.termux/boot|/data/data/com\\.termux/files/home/\\.termux/boot|\\btermux-job-scheduler\\b)",
@@ -1258,6 +1371,101 @@ MALICIOUS_PATTERNS: List[Tuple[str, str, str, str]] = [
         t("eth_sendTransaction 的目的地址硬编码，可能是提币 (drain) 攻击。", "eth_sendTransaction with a hardcoded destination address may indicate a drain attack."),
     ),
 ]
+
+# Curated from Track B after reviewing both malicious and near-miss examples.
+# These are narrow, high-intent primitives; benchmark-specific verdict and
+# fixture-downweighting logic deliberately stays out of the main product.
+CURATED_SKILL_RULES: List[SkillPatternRule] = [
+    SkillPatternRule(
+        "SKL-EXFIL-001",
+        r"(?i)(?:curl\b[^\n]*(?:--data(?:-binary|-raw)?|--upload-file|-F|-T|--form)\b[^\n]*@?[^\n]*|wget\b[^\n]*(?:--post-file|--body-file)\b[^\n]*)(?:\.ssh[/\\]|id_rsa|id_ed25519|\.aws[/\\]credentials|\.netrc|\.npmrc|\.pypirc|\.env\b|/etc/(?:passwd|shadow))",
+        CRIT,
+        t("敏感文件外传 (curl/wget 上传)", "Sensitive-file exfiltration (curl/wget upload)"),
+        t("将密钥、凭证或环境文件直接上传到外部端点。", "Uploads a key, credential, or environment file directly to an external endpoint."),
+        "EXFILTRATION",
+    ),
+    SkillPatternRule(
+        "SKL-EXEC-001",
+        r"(?i)(?:iex|Invoke-Expression)\s*\(\s*(?:(?:\(\s*)?(?:New-Object\s+Net\.WebClient|[^\n]*DownloadString)|(?:iwr|Invoke-WebRequest)\b)",
+        CRIT,
+        t("下载即执行 (PowerShell 函数式)", "Download-and-execute (PowerShell call form)"),
+        t("PowerShell 通过 IEX/Invoke-Expression 直接执行远程下载内容。", "PowerShell executes remotely downloaded content through IEX/Invoke-Expression."),
+        "EXECUTION",
+    ),
+    SkillPatternRule(
+        "SKL-TUNNEL-001",
+        r"(?i)(?:\b(?:nc|ncat|netcat)\b[^\n]*\s-e\s+(?:/bin/(?:ba)?sh|cmd(?:\.exe)?)|\bsocat\b[^\n]*(?:EXEC|SYSTEM):[^\n]*(?:/bin/(?:ba)?sh|cmd(?:\.exe)?))",
+        CRIT,
+        t("反弹/绑定 Shell 执行链", "Reverse/bind shell execution chain"),
+        t("网络工具把连接直接绑定到交互式 shell。", "A networking tool binds a connection directly to an interactive shell."),
+        "TUNNEL",
+    ),
+    SkillPatternRule(
+        "SKL-PRIVESC-001",
+        r"(?i)(?:>>?\s*|tee\s+(?:-a\s+)?)/etc/sudoers(?:\.d(?:/[^\s]+)?)?\b",
+        CRIT,
+        t("写入 sudoers 提权", "Writes to sudoers for privilege escalation"),
+        t("向 sudoers 或 sudoers.d 写入规则，可授予免密 root 权限。", "Writes a sudoers rule that can grant passwordless root access."),
+        "PRIVESC",
+    ),
+    SkillPatternRule(
+        "SKL-PERSIST-001",
+        r"(?i)>>\s*(?:~|\$HOME|/root|/home/[^\s/]+)?/?\.ssh/authorized_keys\b",
+        CRIT,
+        t("SSH 后门 (写入 authorized_keys)", "SSH backdoor (authorized_keys write)"),
+        t("向 authorized_keys 追加密钥，植入持久化远程访问。", "Appends a key to authorized_keys, planting persistent remote access."),
+        "PERSISTENCE",
+    ),
+    SkillPatternRule(
+        "SKL-PERSIST-002",
+        r"(?i)(?:>>?\s*|tee\s+(?:-a\s+)?)/etc/ld\.so\.preload\b",
+        CRIT,
+        t("写入 ld.so.preload 持久化", "Writes ld.so.preload for persistence"),
+        t("注入全局 LD_PRELOAD，使后续进程加载攻击者代码。", "Injects a global LD_PRELOAD so later processes load attacker code."),
+        "PERSISTENCE",
+    ),
+    SkillPatternRule(
+        "SKL-PRIVESC-002",
+        r"(?i)echo\s+[^\n]*:0:0:[^\n]*>>?\s*/etc/passwd\b",
+        HIGH,
+        t("向 /etc/passwd 添加 UID 0 账户", "Adds a UID-0 account to /etc/passwd"),
+        t("向账户数据库追加 root 等价后门账户。", "Appends a root-equivalent backdoor account to the account database."),
+        "PRIVESC",
+    ),
+    SkillPatternRule(
+        "SKL-RCE-001",
+        r"(?i)(?:exec|eval)\s*\(\s*(?:os\.environ(?:\.get)?\s*[\[(]|process\.env\.)",
+        CRIT,
+        t("执行环境变量中的代码", "Executes code from an environment variable"),
+        t("把环境变量内容直接传入 exec/eval，形成隐蔽载荷执行。", "Passes environment content directly to exec/eval, enabling covert payload execution."),
+        "RCE",
+    ),
+    SkillPatternRule(
+        "SKL-DESTRUCT-001",
+        r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
+        CRIT,
+        t("Fork 炸弹", "Fork bomb"),
+        t("快速耗尽系统进程资源并导致拒绝服务。", "Rapidly exhausts process resources and causes denial of service."),
+        "DESTRUCTION",
+    ),
+    SkillPatternRule(
+        "SKL-RCE-002",
+        r"(?i)(?:jsonpickle\.decode\s*\(\s*(?:req(?:uest)?|user|input|body|payload|data|(?:open|Path\s*\([^)]*\)\.open)\s*\([^)]*\)\s*\.read\s*\(\s*\))|[A-Za-z_$][\w$]*\.unserialize\s*\(\s*(?:req(?:uest)?|user|input|body|payload|data)|\bunserialize\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE)|_\$\$ND_FUNC\$\$_)",
+        HIGH,
+        t("不安全反序列化 (jsonpickle/node/PHP)", "Unsafe deserialization (jsonpickle/node/PHP)"),
+        t("对不可信输入进行可执行反序列化，可能导致远程代码执行。", "Performs executable deserialization on untrusted input, which may lead to remote code execution."),
+        "RCE",
+    ),
+    SkillPatternRule(
+        "SKL-RCE-003",
+        r"(?i)(?:ObjectInputStream\s*\([^\n]*\)\.readObject|XMLDecoder\s*\(|BinaryFormatter\s*\(\s*\)\.Deserialize)",
+        HIGH,
+        t("不安全反序列化 (Java/.NET)", "Unsafe deserialization (Java/.NET)"),
+        t("Java/.NET 反序列化入口可能对不可信数据执行代码。", "A Java/.NET deserialization sink may execute code from untrusted data."),
+        "RCE",
+    ),
+]
+
 # Pattern categories — surfaced on every skill finding via Finding.metadata
 # so reporters can group / filter by attack class. Each entry is matched
 # (in order) against the pattern's bilingual title+detail text.  More specific
@@ -1295,7 +1503,26 @@ def _classify_pattern(title: str, detail: str = "") -> str:
 
 
 _COMPILED_MALICIOUS_PATTERNS = [
-    (re.compile(p), level, title, detail, _classify_pattern(title, detail))
+    (
+        re.compile(rule.pattern),
+        rule.level,
+        rule.title,
+        rule.detail,
+        rule.category,
+        rule.rule_id,
+        rule.confidence,
+    )
+    for rule in CURATED_SKILL_RULES
+] + [
+    (
+        re.compile(p),
+        level,
+        title,
+        detail,
+        _classify_pattern(title, detail),
+        "",
+        "medium",
+    )
     for p, level, title, detail in MALICIOUS_PATTERNS
 ]
 
@@ -1355,108 +1582,937 @@ def _python_docstring_line_set(content: str) -> Set[int]:
     return doc_lines
 
 
+def _skill_scan_diagnostic(title: str, detail: str, location: Path) -> Finding:
+    return Finding(
+        "internal",
+        WARN,
+        title,
+        detail,
+        str(location),
+        remediation=t(
+            "缩小或检查该 Skill 包后重新扫描；不要把不完整结果视为通过。",
+            "Inspect or reduce the Skill package and scan again; do not treat an incomplete result as a pass.",
+        ),
+        metadata={"scan_status": "error", "component": "skill_walk"},
+    )
+
+
+def _discover_skill_text_files(
+    skill_path: Path,
+    findings: List[Finding],
+) -> List[Path]:
+    """Discover bounded, deterministic text candidates without following links."""
+    if skill_path.is_symlink():
+        try:
+            resolved = skill_path.resolve(strict=True)
+            resolved.relative_to(skill_path.parent.resolve())
+        except ValueError:
+            findings.append(
+                Finding(
+                    "skill",
+                    HIGH,
+                    t(
+                        "[FILE_ACCESS] Skill 根符号链接逃逸所在目录",
+                        "[FILE_ACCESS] Skill root symlink escapes its directory",
+                    ),
+                    t(
+                        "Skill 入口本身是指向所在目录之外的符号链接，安装或执行时可能访问未声明的宿主文件。",
+                        "The Skill entry itself is a symlink outside its containing directory and may access undeclared host files when installed or run.",
+                    ),
+                    str(skill_path),
+                    remediation=t(
+                        "移除外部符号链接，并对真实包路径单独执行扫描。",
+                        "Remove the external symlink and scan the real package path explicitly.",
+                    ),
+                    metadata={
+                        "category": "FILE_ACCESS",
+                        "file": str(skill_path),
+                        "rule_id": "SKL-FILE-001",
+                        "confidence": "high",
+                    },
+                )
+            )
+        except OSError:
+            pass
+        findings.append(
+            _skill_scan_diagnostic(
+                t(
+                    "Skill 根符号链接未被跟随",
+                    "Skill root symlink was not followed",
+                ),
+                t(
+                    "为避免越界读取，扫描器不会跟随作为包入口的符号链接。",
+                    "The scanner does not follow a symlink used as the package entry, preventing out-of-scope reads.",
+                ),
+                skill_path,
+            )
+        )
+        return []
+    if skill_path.is_file():
+        return [skill_path]
+
+    root = skill_path.resolve()
+    stack = [skill_path]
+    files: List[Path] = []
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name.lower())
+        except OSError as exc:
+            findings.append(
+                _skill_scan_diagnostic(
+                    t("Skill 目录无法读取", "Skill directory could not be read"),
+                    str(exc)[:300],
+                    directory,
+                )
+            )
+            continue
+
+        child_dirs: List[Path] = []
+        for entry in entries:
+            if entry.is_symlink():
+                try:
+                    entry.resolve().relative_to(root)
+                except (OSError, ValueError):
+                    findings.append(
+                        Finding(
+                            "skill",
+                            HIGH,
+                            t(
+                                "[FILE_ACCESS] Skill 符号链接逃逸包目录",
+                                "[FILE_ACCESS] Skill symlink escapes its package",
+                            ),
+                            t(
+                                "符号链接指向 Skill 根目录之外，安装或执行时可能访问未声明的宿主文件。",
+                                "A symlink points outside the Skill root and may access undeclared host files when installed or run.",
+                            ),
+                            str(entry),
+                            remediation=t(
+                                "移除外部符号链接并把所需内容显式纳入包内。",
+                                "Remove the external symlink and include required content explicitly in the package.",
+                            ),
+                            metadata={"category": "FILE_ACCESS", "file": str(entry)},
+                        )
+                    )
+                # Never follow links, including links that currently resolve
+                # inside the package; the real file will be scanned normally.
+                continue
+            try:
+                is_dir = entry.is_dir()
+                is_file = entry.is_file()
+            except OSError as exc:
+                findings.append(
+                    _skill_scan_diagnostic(
+                        t("Skill 路径无法检查", "Skill path could not be inspected"),
+                        str(exc)[:300],
+                        entry,
+                    )
+                )
+                continue
+            if is_dir:
+                if entry.name not in _SKILL_PRUNED_DIRS:
+                    child_dirs.append(entry)
+                continue
+            # Extensions are only hints.  A text script can be deliberately
+            # named ``payload.png`` and still be executed by an interpreter;
+            # actual binary content is rejected by bounded magic/NUL sniffing.
+            if not is_file:
+                continue
+            if len(files) >= _SKILL_MAX_FILES:
+                findings.append(
+                    _skill_scan_diagnostic(
+                        t("Skill 文件数量超过扫描上限", "Skill file count exceeds scan limit"),
+                        t(
+                            f"最多扫描 {_SKILL_MAX_FILES} 个文本文件。",
+                            f"At most {_SKILL_MAX_FILES} text files are scanned.",
+                        ),
+                        skill_path,
+                    )
+                )
+                return files
+            files.append(entry)
+        stack.extend(reversed(child_dirs))
+    return files
+
+
+def _read_skill_text_prefix(
+    path: Path,
+    limit: int,
+) -> Tuple[Optional[str], bool, int]:
+    """Return decoded prefix, truncation state, and bytes consumed."""
+    with path.open("rb") as stream:
+        probe = stream.read(min(limit + 1, 8192))
+        is_utf16 = probe.startswith((b"\xff\xfe", b"\xfe\xff"))
+        is_binary = (
+            not is_utf16
+            and (
+                any(probe.startswith(magic) for magic in _SKILL_BINARY_MAGIC_PREFIXES)
+                or b"\x00" in probe
+                or (len(probe) >= 265 and probe[257:262] == b"ustar")
+                or (len(probe) >= 12 and probe[4:8] == b"ftyp")
+            )
+        )
+        if is_binary:
+            return None, False, min(len(probe), limit)
+        raw = probe
+        if len(raw) < limit + 1:
+            raw += stream.read(limit + 1 - len(raw))
+    truncated = len(raw) > limit
+    raw = raw[:limit]
+    if is_utf16:
+        return raw.decode("utf-16", errors="ignore"), truncated, len(raw)
+    return raw.decode("utf-8-sig", errors="ignore"), truncated, len(raw)
+
+
+def _skill_line_windows(line: str) -> List[Tuple[str, int]]:
+    """Return bounded first/last and risk-anchor windows for one logical line.
+
+    Running every regex over a multi-megabyte minified line can itself become a
+    denial-of-service primitive.  Oversized lines are therefore sampled around
+    their boundaries and a small number of cheap keyword anchors; the caller
+    marks the overall scan incomplete instead of silently claiming full coverage.
+    """
+    if len(line) <= _SKILL_MAX_LINE_CHARS:
+        return [(line, 0)]
+    max_start = len(line) - _SKILL_MAX_LINE_CHARS
+    starts = {0, max_start}
+    first_anchors: List[int] = []
+    last_anchors: List[int] = []
+    for match in _SKILL_LONG_LINE_ANCHOR_RE.finditer(line):
+        position = match.start()
+        if len(first_anchors) < 3:
+            first_anchors.append(position)
+        last_anchors.append(position)
+        if len(last_anchors) > 3:
+            last_anchors.pop(0)
+    for position in [*first_anchors, *last_anchors]:
+        starts.add(max(0, min(max_start, position - (_SKILL_MAX_LINE_CHARS // 2))))
+    return [
+        (line[start : start + _SKILL_MAX_LINE_CHARS], start)
+        for start in sorted(starts)
+    ]
+
+
+def _append_capability_graph_findings(
+    content: str,
+    *,
+    location: str,
+    skill_name: str,
+    findings: List[Finding],
+    seen: Set[str],
+) -> None:
+    """Synthesize evidence-linked attack chains from one logical source."""
+
+    try:
+        from .capabilities import analyze_capabilities
+
+        analysis = analyze_capabilities(text=content, location=location)
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 能力图分析", "Skill capability graph analysis"), exc
+        )
+        diagnostic.location = location
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "capability_graph"}
+        )
+        findings.append(diagnostic)
+        return
+
+    if not analysis.graph.complete:
+        findings.append(
+            Finding(
+                "internal",
+                WARN,
+                t("Skill 能力图分析不完整", "Skill capability graph analysis incomplete"),
+                "; ".join(analysis.graph.diagnostics[:10]),
+                location,
+                metadata={"scan_status": "error", "component": "capability_graph"},
+            )
+        )
+    for detection in analysis.detections:
+        key = f"capability:{detection.rule_id}:{':'.join(detection.event_ids)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence_path = [event.to_dict() for event in detection.evidence_path]
+        first = detection.evidence_path[0]
+        last = detection.evidence_path[-1]
+        line = last.line or first.line
+        finding_location = f"{location}:{line}" if line else location
+        findings.append(
+            Finding(
+                "capability_graph",
+                detection.severity,
+                f"[{detection.rule_id}] [{skill_name}] {detection.title}",
+                detection.detail,
+                finding_location,
+                " → ".join(event.evidence[:100] for event in detection.evidence_path)[:300],
+                remediation=t(
+                    "拆断能力链，限制敏感数据可达性、外部目的地或执行权限。",
+                    "Break the capability chain by restricting sensitive reachability, destinations, or execution authority.",
+                ),
+                metadata={
+                    "rule_id": detection.rule_id,
+                    "category": "COMPOSITE",
+                    "skill": skill_name,
+                    "confidence_score": detection.confidence,
+                    "evidence_path": evidence_path,
+                    **dict(detection.metadata),
+                },
+            )
+        )
+
+
+def _skill_supply_chain_findings(skill_path: Path) -> List[Finding]:
+    """Run structured manifests plus a bounded transitive instruction graph."""
+
+    from .supply_chain import build_instruction_graph, scan_supply_chain
+
+    findings: List[Finding] = []
+    if skill_path.is_dir():
+        root = skill_path
+        supply_target = root
+        entries = [
+            candidate
+            for candidate in (
+                root / "SKILL.md",
+                root / "AGENTS.md",
+                root / "CLAUDE.md",
+            )
+            if candidate.is_file()
+        ]
+    else:
+        root = skill_path.parent
+        structured_names = {
+            "SKILL.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+        }
+        supply_target = root if skill_path.name in structured_names else skill_path
+        entries = [skill_path] if skill_path.suffix.lower() in {".md", ".txt"} else []
+
+    report = scan_supply_chain(supply_target)
+    for issue in report.issues:
+        findings.append(
+            Finding(
+                "supply_chain",
+                issue.severity,
+                f"[{issue.rule_id}] {issue.title}",
+                issue.detail,
+                issue.location,
+                issue.evidence,
+                remediation=t(
+                    "固定不可变版本/摘要，并审查安装期脚本与构建后端。",
+                    "Pin immutable versions/digests and review install scripts and build backends.",
+                ),
+                metadata={
+                    "rule_id": issue.rule_id,
+                    "category": "SUPPLY_CHAIN",
+                    "confidence_score": issue.confidence,
+                    **dict(issue.metadata),
+                },
+            )
+        )
+    if not report.complete:
+        findings.append(
+            Finding(
+                "internal",
+                WARN,
+                t("供应链清单分析不完整", "Supply-chain inventory incomplete"),
+                "; ".join(report.diagnostics[:20]),
+                str(supply_target),
+                metadata={"scan_status": "error", "component": "supply_chain"},
+            )
+        )
+
+    if entries:
+        expected_hashes: Dict[str, str] = {}
+        for candidate in (
+            root / ".clawlock-instruction-hashes.json",
+            root / ".clawlock" / "instruction-hashes.json",
+        ):
+            if not candidate.is_file():
+                continue
+            try:
+                value = json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    expected_hashes.update(
+                        {str(key): str(digest) for key, digest in value.items()}
+                    )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                findings.append(
+                    Finding(
+                        "internal",
+                        WARN,
+                        t("外部指令哈希清单无法读取", "Instruction hash manifest could not be read"),
+                        str(exc),
+                        str(candidate),
+                        metadata={
+                            "scan_status": "error",
+                            "component": "instruction_graph",
+                        },
+                    )
+                )
+        graph = build_instruction_graph(
+            root,
+            entries,
+            expected_hashes=expected_hashes,
+            remote_loader=None,
+        )
+        for issue in graph.issues:
+            findings.append(
+                Finding(
+                    "instruction_graph",
+                    issue.severity,
+                    f"[{issue.rule_id}] {issue.title}",
+                    issue.detail,
+                    issue.location,
+                    issue.evidence,
+                    remediation=t(
+                        "将指令固定到本地受审内容、SHA-256 或不可变 commit。",
+                        "Pin instructions to reviewed local content, SHA-256, or an immutable commit.",
+                    ),
+                    metadata={
+                        "rule_id": issue.rule_id,
+                        "category": "EXTERNAL_INSTRUCTIONS",
+                        "confidence_score": issue.confidence,
+                        **dict(issue.metadata),
+                    },
+                )
+            )
+        if not graph.complete:
+            findings.append(
+                Finding(
+                    "internal",
+                    WARN,
+                    t("传递指令图分析不完整", "Transitive instruction graph incomplete"),
+                    "; ".join(graph.diagnostics[:20]),
+                    str(root),
+                    metadata={
+                        "scan_status": "error",
+                        "component": "instruction_graph",
+                    },
+                )
+            )
+    return findings
+
+
+def _skill_runtime_security_findings(skill_path: Path) -> List[Finding]:
+    """Audit deployment manifests shipped with a Skill without executing them."""
+
+    from .runtime_security import audit_runtime_security
+
+    if skill_path.is_file():
+        name = skill_path.name.lower()
+        if not (
+            name.startswith(("dockerfile", "containerfile"))
+            or name in {
+                "compose.yaml",
+                "compose.yml",
+                "docker-compose.yaml",
+                "docker-compose.yml",
+            }
+        ):
+            return []
+    report = audit_runtime_security(skill_path)
+    findings: List[Finding] = []
+    for issue in report.issues:
+        kwargs = issue.as_finding_kwargs()
+        kwargs["title"] = f"[{issue.rule_id}] {issue.title}"
+        findings.append(Finding(**kwargs))
+    return findings
+
+
+def _skill_dataflow_findings(skill_path: Path) -> List[Finding]:
+    """Run the shared project-level Python source-to-sink engine once per Skill."""
+
+    from .dataflow import analyze_project, analyze_python_file
+    from .dataflow_reporting import findings_from_dataflow
+
+    if skill_path.is_file():
+        if skill_path.suffix.lower() != ".py":
+            return []
+        result = analyze_python_file(skill_path)
+        root = skill_path.parent
+    else:
+        result = analyze_project(skill_path)
+        root = skill_path
+    return findings_from_dataflow(result, scanner="skill_dataflow", root=root)
+
+
+def _scan_virtual_skill_text(
+    item: Any,
+    *,
+    skill_name: str,
+    findings: List[Finding],
+    seen: Set[str],
+) -> None:
+    """Run the ordinary Skill rule registry over safely recovered content.
+
+    ``item`` is a :class:`artifacts.VirtualText`.  It is kept duck-typed here
+    to avoid loading the artifact subsystem during lightweight module imports.
+    Archive members and bytecode are never written to disk or executed.
+    """
+
+    virtual_path = str(item.path)
+    content = str(item.text)
+    item_kind = str(item.kind)
+    source_metadata = dict(getattr(item, "metadata", {}) or {})
+    py_doc_lines: Set[int] = (
+        _python_docstring_line_set(content)
+        if virtual_path.split("#", 1)[0].lower().endswith(".py")
+        else set()
+    )
+    oversized_line_reported = False
+    for line_number, raw_line in enumerate(content.splitlines(), 1):
+        if len(raw_line) > _SKILL_MAX_LINE_CHARS and not oversized_line_reported:
+            findings.append(
+                Finding(
+                    "internal",
+                    WARN,
+                    t(
+                        "制品内超长单行仅完成稀疏窗口扫描",
+                        "Oversized artifact line received sparse-window scanning",
+                    ),
+                    t(
+                        f"{virtual_path} 第 {line_number} 行超过 {_SKILL_MAX_LINE_CHARS} 个字符。",
+                        f"Line {line_number} in {virtual_path} exceeds {_SKILL_MAX_LINE_CHARS} characters.",
+                    ),
+                    f"{virtual_path}:{line_number}",
+                    metadata={
+                        "scan_status": "error",
+                        "component": "artifact_text_scan",
+                        "artifact_kind": item_kind,
+                    },
+                )
+            )
+            oversized_line_reported = True
+        is_comment = _is_comment_line(raw_line)
+        in_py_docstring = line_number in py_doc_lines
+        for line, column_offset in _skill_line_windows(raw_line):
+            unwrapped = _unwrap_shell_commands(line)
+            candidates = [(line, False), *((value, True) for value in unwrapped)]
+            is_deobfuscated = False
+            for candidate, was_deobfuscated in candidates:
+                for (
+                    compiled_pat,
+                    level,
+                    title,
+                    detail,
+                    category,
+                    rule_id,
+                    confidence,
+                ) in _COMPILED_MALICIOUS_PATTERNS:
+                    if is_comment and level != CRIT:
+                        continue
+                    if in_py_docstring and category not in _STRING_SAFE_CATEGORIES:
+                        continue
+                    match = compiled_pat.search(candidate)
+                    if match is None:
+                        continue
+                    key = (
+                        f"artifact:{compiled_pat.pattern}:{virtual_path}:{line_number}"
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    suffix = (
+                        t(" (反混淆后发现)", " (found after deobfuscation)")
+                        if was_deobfuscated
+                        else ""
+                    )
+                    snippet_start = max(0, match.start() - 40)
+                    snippet_end = min(
+                        len(candidate), max(match.end() + 80, snippet_start + 120)
+                    )
+                    snippet = " ".join(
+                        candidate[snippet_start:snippet_end].strip().splitlines()
+                    )[:200]
+                    metadata = {
+                        "skill": skill_name,
+                        "category": category,
+                        "file": virtual_path,
+                        "line": line_number,
+                        "deobfuscated": was_deobfuscated,
+                        "rule_id": rule_id,
+                        "confidence": confidence,
+                        "artifact": True,
+                        "artifact_kind": item_kind,
+                        **source_metadata,
+                    }
+                    if not was_deobfuscated:
+                        metadata["column"] = column_offset + match.start() + 1
+                    findings.append(
+                        Finding(
+                            "skill",
+                            level,
+                            f"[{category}] [{skill_name}] {title}{suffix}",
+                            detail,
+                            f"{virtual_path}:{line_number}",
+                            snippet,
+                            metadata=metadata,
+                        )
+                    )
+                    if was_deobfuscated:
+                        is_deobfuscated = True
+            if unwrapped and is_deobfuscated:
+                key = f"artifact:__obfuscation__:{virtual_path}:{line_number}"
+                if key not in seen:
+                    seen.add(key)
+                    findings.append(
+                        Finding(
+                            "skill",
+                            WARN,
+                            t(
+                                f"[OBFUSCATION] [{skill_name}] 制品内 Shell 命令嵌套混淆",
+                                f"[OBFUSCATION] [{skill_name}] Nested shell obfuscation inside artifact",
+                            ),
+                            t(
+                                f"检测到 {len(unwrapped)} 层 shell 包装。",
+                                f"Detected {len(unwrapped)} layers of shell wrapping.",
+                            ),
+                            f"{virtual_path}:{line_number}",
+                            line.strip()[:120],
+                            remediation=t(
+                                "审查解包后的实际命令。",
+                                "Review the unwrapped command.",
+                            ),
+                            metadata={
+                                "skill": skill_name,
+                                "category": "OBFUSCATION",
+                                "file": virtual_path,
+                                "line": line_number,
+                                "artifact": True,
+                                "artifact_kind": item_kind,
+                                "unwrapped_commands": unwrapped,
+                            },
+                        )
+                    )
+
+
 def scan_skill(skill_path: Path) -> List[Finding]:
     findings: List[Finding] = []
     skill_name = skill_path.stem if skill_path.is_file() else skill_path.name
-    files: List[Path] = []
-    if skill_path.is_file():
-        files = [skill_path]
-    else:
-        for ext in [
-            "*.md",
-            "*.sh",
-            "*.bash",
-            "*.py",
-            "*.js",
-            "*.ts",
-            "*.mjs",
-            "*.json",
-            "*.yaml",
-            "*.yml",
-            "*.toml",
-            "*.env",
-        ]:
-            files.extend(skill_path.rglob(ext))
+    files = _discover_skill_text_files(skill_path, findings)
     seen: set = set()
+    total_bytes = 0
     for f in files:
-        if "node_modules" in str(f) or ".git" in str(f):
-            continue
         try:
-            content = f.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+            relative_name = (
+                f.name if skill_path.is_file() else f.relative_to(skill_path).as_posix()
+            )
+        except ValueError:
+            relative_name = f.name
+        remaining = _SKILL_MAX_TOTAL_BYTES - total_bytes
+        if remaining <= 0:
+            findings.append(
+                _skill_scan_diagnostic(
+                    t("Skill 总读取量超过扫描上限", "Skill total read budget exceeded"),
+                    t(
+                        f"本次最多读取 {_SKILL_MAX_TOTAL_BYTES // (1024 * 1024)} MiB 文本。",
+                        f"This scan reads at most {_SKILL_MAX_TOTAL_BYTES // (1024 * 1024)} MiB of text.",
+                    ),
+                    skill_path,
+                )
+            )
+            break
+        read_limit = min(_SKILL_MAX_FILE_BYTES, remaining)
+        try:
+            content, truncated, bytes_read = _read_skill_text_prefix(f, read_limit)
+        except OSError as exc:
+            findings.append(
+                _skill_scan_diagnostic(
+                    t("Skill 文件无法读取", "Skill file could not be read"),
+                    str(exc)[:300],
+                    f,
+                )
+            )
             continue
+        total_bytes += bytes_read
+        if content is None:
+            continue
+        if truncated:
+            findings.append(
+                _skill_scan_diagnostic(
+                    t("Skill 文件仅完成前缀扫描", "Skill file was only partially scanned"),
+                    t(
+                        f"单文件最多读取 {read_limit // 1024} KiB，剩余内容未检查。",
+                        f"Only the first {read_limit // 1024} KiB were read; remaining content was not inspected.",
+                    ),
+                    f,
+                )
+            )
         py_doc_lines: Set[int] = (
             _python_docstring_line_set(content) if f.suffix == ".py" else set()
         )
-        for i, line in enumerate(content.splitlines(), 1):
-            # Build candidate lines: original + any unwrapped shell payloads
-            candidates = [line]
-            unwrapped = _unwrap_shell_commands(line)
-            candidates.extend(unwrapped)
-            is_deobfuscated = False
-            is_comment = _is_comment_line(line)
+        oversized_line_reported = False
+        for i, raw_line in enumerate(content.splitlines(), 1):
+            if len(raw_line) > _SKILL_MAX_LINE_CHARS and not oversized_line_reported:
+                findings.append(
+                    _skill_scan_diagnostic(
+                        t(
+                            "Skill 超长单行仅完成稀疏窗口扫描",
+                            "Skill oversized line received sparse-window scanning",
+                        ),
+                        t(
+                            f"第 {i} 行超过 {_SKILL_MAX_LINE_CHARS} 个字符；已检查首尾与风险关键词附近窗口，其余内容未逐字符执行完整规则集。",
+                            f"Line {i} exceeds {_SKILL_MAX_LINE_CHARS} characters; boundary and risk-keyword windows were checked, but the remaining content did not receive the full rule set.",
+                        ),
+                        f,
+                    )
+                )
+                oversized_line_reported = True
+            is_comment = _is_comment_line(raw_line)
             in_py_docstring = i in py_doc_lines
-            for candidate in candidates:
-                for compiled_pat, level, title, detail, category in _COMPILED_MALICIOUS_PATTERNS:
-                    # Skip non-CRIT patterns on comment lines to reduce false positives
-                    if is_comment and level != CRIT:
-                        continue
-                    # Skip code-focused categories inside Python docstrings —
-                    # they're documentation, not executable code. Threats that
-                    # CAN actually live in a string body (prompt injection,
-                    # credentials, obfuscation, mnemonics) still fire.
-                    if in_py_docstring and category not in _STRING_SAFE_CATEGORIES:
-                        continue
-                    if compiled_pat.search(candidate):
+            for line, column_offset in _skill_line_windows(raw_line):
+                # Build candidate windows: original + any unwrapped shell payloads.
+                unwrapped = _unwrap_shell_commands(line)
+                candidates = [(line, False), *((item, True) for item in unwrapped)]
+                is_deobfuscated = False
+                for candidate, was_deobfuscated in candidates:
+                    for (
+                        compiled_pat,
+                        level,
+                        title,
+                        detail,
+                        category,
+                        rule_id,
+                        confidence,
+                    ) in _COMPILED_MALICIOUS_PATTERNS:
+                        # Skip non-CRIT patterns on comment lines to reduce false positives.
+                        if is_comment and level != CRIT:
+                            continue
+                        # Skip code-focused categories inside Python docstrings —
+                        # they're documentation, not executable code. Threats that
+                        # CAN actually live in a string body (prompt injection,
+                        # credentials, obfuscation, mnemonics) still fire.
+                        if in_py_docstring and category not in _STRING_SAFE_CATEGORIES:
+                            continue
+                        match = compiled_pat.search(candidate)
+                        if match is None:
+                            continue
                         key = f"{compiled_pat.pattern}:{f}:{i}"
                         if key in seen:
                             continue
                         seen.add(key)
-                        suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
+                        suffix = (
+                            t(" (反混淆后发现)", " (found after deobfuscation)")
+                            if was_deobfuscated
+                            else ""
+                        )
+                        snippet_start = max(0, match.start() - 40)
+                        snippet_end = min(
+                            len(candidate), max(match.end() + 80, snippet_start + 120)
+                        )
+                        snippet = " ".join(
+                            candidate[snippet_start:snippet_end].strip().splitlines()
+                        )[:200]
+                        metadata = {
+                            "skill": skill_name,
+                            "category": category,
+                            "file": str(f),
+                            "line": i,
+                            "deobfuscated": was_deobfuscated,
+                            "rule_id": rule_id,
+                            "confidence": confidence,
+                        }
+                        if not was_deobfuscated:
+                            metadata["column"] = column_offset + match.start() + 1
                         findings.append(
                             Finding(
                                 "skill",
                                 level,
                                 f"[{category}] [{skill_name}] {title}{suffix}",
                                 detail,
-                                f"{f.name}:{i}",
+                                f"{relative_name}:{i}",
+                                snippet,
+                                metadata=metadata,
+                            )
+                        )
+                        if was_deobfuscated:
+                            is_deobfuscated = True
+                # If shell wrapping was detected and inner payloads were found,
+                # emit an additional info-level finding about the obfuscation.
+                if unwrapped and is_deobfuscated:
+                    ob_key = f"__obfuscation__:{f}:{i}"
+                    if ob_key not in seen:
+                        seen.add(ob_key)
+                        findings.append(
+                            Finding(
+                                "skill",
+                                WARN,
+                                t(
+                                    f"[OBFUSCATION] [{skill_name}] Shell 命令嵌套混淆",
+                                    f"[OBFUSCATION] [{skill_name}] Nested shell command obfuscation",
+                                ),
+                                t(
+                                    f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
+                                    f"Detected {len(unwrapped)} layers of shell wrapping; may attempt to bypass static analysis.",
+                                ),
+                                f"{relative_name}:{i}",
                                 line.strip()[:120],
+                                remediation=t(
+                                    "审查解包后的实际命令。",
+                                    "Review the unwrapped commands.",
+                                ),
                                 metadata={
                                     "skill": skill_name,
-                                    "category": category,
+                                    "category": "OBFUSCATION",
                                     "file": str(f),
                                     "line": i,
-                                    "deobfuscated": candidate is not line,
+                                    "unwrapped_commands": unwrapped,
                                 },
                             )
                         )
-                        if candidate is not line:
-                            is_deobfuscated = True
-            # If shell wrapping was detected and inner payloads were found,
-            # emit an additional info-level finding about the obfuscation.
-            if unwrapped and is_deobfuscated:
-                ob_key = f"__obfuscation__:{f}:{i}"
-                if ob_key not in seen:
-                    seen.add(ob_key)
-                    findings.append(
-                        Finding(
-                            "skill",
-                            WARN,
-                            t(f"[OBFUSCATION] [{skill_name}] Shell 命令嵌套混淆", f"[OBFUSCATION] [{skill_name}] Nested shell command obfuscation"),
-                            t(f"检测到 {len(unwrapped)} 层 shell 包装，可能试图绕过静态检测。",
-                              f"Detected {len(unwrapped)} layers of shell wrapping; may attempt to bypass static analysis."),
-                            f"{f.name}:{i}",
-                            line.strip()[:120],
-                            remediation=t("审查解包后的实际命令。", "Review the unwrapped commands."),
-                            metadata={
-                                "skill": skill_name,
-                                "category": "OBFUSCATION",
-                                "file": str(f),
-                                "line": i,
-                                "unwrapped_commands": unwrapped,
-                            },
-                        )
-                    )
+
+        _append_capability_graph_findings(
+            content,
+            location=relative_name,
+            skill_name=skill_name,
+            findings=findings,
+            seen=seen,
+        )
+
+    # The ordinary walker deliberately avoids binary content.  Run the
+    # bounded artifact layer after it, then feed only virtual/recovered text
+    # back through the exact same Skill rule registry.  Real text files have
+    # already been scanned above and are skipped here to prevent duplicates.
+    try:
+        from .artifacts import inspect_artifacts
+
+        artifact_result = inspect_artifacts(skill_path)
+        ledger_rows = [
+            {
+                "path": entry.path,
+                "status": entry.status,
+                "kind": entry.kind,
+                "reason": entry.reason,
+                "critical": entry.critical,
+                "metadata": entry.metadata,
+            }
+            for entry in artifact_result.ledger
+        ]
+        status_counts: Dict[str, int] = {}
+        for row in ledger_rows:
+            status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
+        ledger_digest = hashlib.sha256(
+            json.dumps(
+                ledger_rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        findings.append(
+            Finding(
+                "artifact_ledger",
+                INFO,
+                t(
+                    f"制品检查清单：{artifact_result.status} / {len(ledger_rows)} 项",
+                    f"Artifact inspection ledger: {artifact_result.status} / {len(ledger_rows)} entries",
+                ),
+                t(
+                    f"扫描 {artifact_result.members_seen} 个对象，展开 {artifact_result.expanded_bytes} 字节。",
+                    f"Inspected {artifact_result.members_seen} objects and expanded {artifact_result.expanded_bytes} bytes.",
+                ),
+                str(skill_path),
+                metadata={
+                    "component": "artifact_inspection",
+                    "inspection_status": artifact_result.status,
+                    "complete": artifact_result.complete,
+                    "status_counts": status_counts,
+                    "ledger_sha256": ledger_digest,
+                    "ledger": ledger_rows,
+                },
+            )
+        )
+        findings.extend(
+            Finding(**finding_kwargs)
+            for finding_kwargs in artifact_result.as_finding_kwargs()
+        )
+        for item in artifact_result.texts:
+            if (
+                "!" not in item.path
+                and not item.kind.startswith("pyc-")
+                and item.kind != "xml-text"
+            ):
+                continue
+            _scan_virtual_skill_text(
+                item,
+                skill_name=skill_name,
+                findings=findings,
+                seen=seen,
+            )
+            _append_capability_graph_findings(
+                item.text,
+                location=item.path,
+                skill_name=skill_name,
+                findings=findings,
+                seen=seen,
+            )
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 制品检查", "Skill artifact inspection"), exc
+        )
+        diagnostic.location = str(skill_path)
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "artifact_inspection"}
+        )
+        findings.append(diagnostic)
+
+    try:
+        findings.extend(_skill_supply_chain_findings(skill_path))
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 供应链结构化分析", "Structured Skill supply-chain analysis"),
+            exc,
+        )
+        diagnostic.location = str(skill_path)
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "supply_chain"}
+        )
+        findings.append(diagnostic)
+
+    try:
+        findings.extend(_skill_runtime_security_findings(skill_path))
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 运行时部署审计", "Skill runtime deployment audit"), exc
+        )
+        diagnostic.location = str(skill_path)
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "runtime_security"}
+        )
+        findings.append(diagnostic)
+
+    try:
+        findings.extend(_skill_dataflow_findings(skill_path))
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 项目级数据流分析", "Skill project-level data-flow analysis"), exc
+        )
+        diagnostic.location = str(skill_path)
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "dataflow_v2"}
+        )
+        findings.append(diagnostic)
+
+    try:
+        from .capability_reporting import correlate_findings
+
+        findings.extend(correlate_findings(findings, subject=str(skill_path)))
+    except Exception as exc:
+        diagnostic = _scanner_error_finding(
+            t("Skill 聚合能力链分析", "Skill aggregate capability-chain analysis"), exc
+        )
+        diagnostic.location = str(skill_path)
+        diagnostic.metadata.update(
+            {"scan_status": "error", "component": "capability_graph"}
+        )
+        findings.append(diagnostic)
     return findings
 
 
@@ -1474,8 +2530,12 @@ def scan_all_skills(
     for d in dirs:
         if not d.exists():
             continue
-        for item in d.iterdir():
-            if item.is_dir() or item.suffix == ".md":
+        for item in sorted(d.iterdir(), key=lambda candidate: candidate.name.lower()):
+            # Skill bundles are not reliably named: archives may use custom
+            # extensions or no extension at all.  ``scan_skill`` performs
+            # bounded magic sniffing, so every regular top-level file is a
+            # legitimate candidate instead of only Markdown files.
+            if item.is_dir() or item.is_file() or item.is_symlink():
                 findings.extend(scan_skill(item))
                 scanned += 1
     return (findings, scanned)
@@ -1569,7 +2629,13 @@ def _save_hashes(d: dict):
 
 
 def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
-    """Scan one file for injection patterns + drift."""
+    """Scan one file for injection patterns + drift.
+
+    The first observation establishes a baseline.  A later mismatch is never
+    accepted implicitly: only the explicit ``soul --update-baseline`` path may
+    replace a trusted hash.  This prevents a malicious edit from becoming the
+    new baseline merely because the scanner observed it once.
+    """
     findings = []
     if not filepath.exists():
         return findings
@@ -1592,7 +2658,8 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
     current_hash = hashlib.sha256(content.encode()).hexdigest()
     stored = _load_hashes()
     key = str(filepath.resolve())
-    if key in stored and stored[key] != current_hash:
+    previous_hash = stored.get(key)
+    if previous_hash is not None and previous_hash != current_hash:
         findings.append(
             Finding(
                 "soul",
@@ -1602,11 +2669,16 @@ def _scan_single_file_drift(filepath: Path, label: str) -> List[Finding]:
                 str(filepath),
                 remediation=t("若变更是预期的，运行 `clawlock soul --update-baseline` 更新基准。",
                               "If the change is expected, run `clawlock soul --update-baseline` to update the baseline."),
-                metadata={"prev": stored[key][:12], "curr": current_hash[:12]},
+                metadata={
+                    "prev": previous_hash[:12],
+                    "curr": current_hash[:12],
+                    "baseline_preserved": True,
+                },
             )
         )
-    stored[key] = current_hash
-    _save_hashes(stored)
+    elif previous_hash is None:
+        stored[key] = current_hash
+        _save_hashes(stored)
     return findings
 
 
@@ -1727,11 +2799,93 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
             continue
         seen_configs.add(key)
         try:
-            data = json.loads(cfg_path.read_text())
-        except Exception:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("top-level MCP config must be a JSON object")
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            diagnostic = _scanner_error_finding(
+                t(f"MCP 配置 {cfg_path}", f"MCP config {cfg_path}"),
+                exc,
+            )
+            diagnostic.location = str(cfg_path)
+            diagnostic.metadata.update(
+                {"scan_status": "error", "component": "mcp_config"}
+            )
+            findings.append(diagnostic)
             continue
         servers = data.get("mcpServers", data.get("servers", {}))
+        if not isinstance(servers, dict):
+            diagnostic = Finding(
+                "internal",
+                WARN,
+                t("MCP 配置结构无效", "Invalid MCP config structure"),
+                t(
+                    "mcpServers/servers 必须是对象，MCP 检查未完整执行。",
+                    "mcpServers/servers must be an object; the MCP check did not complete.",
+                ),
+                str(cfg_path),
+                metadata={"scan_status": "error", "component": "mcp_config"},
+            )
+            findings.append(diagnostic)
+            continue
         for srv_name, srv in servers.items():
+            if not isinstance(srv, dict):
+                findings.append(
+                    Finding(
+                        "internal",
+                        WARN,
+                        t("MCP Server 配置结构无效", "Invalid MCP server entry"),
+                        t(
+                            "单个 MCP Server 配置必须是对象；该服务未完成检查。",
+                            "Each MCP server entry must be an object; this server was not fully checked.",
+                        ),
+                        f"{cfg_path.name}:mcpServers.{srv_name}",
+                        metadata={
+                            "scan_status": "error",
+                            "component": "mcp_config",
+                            "server": str(srv_name),
+                        },
+                    )
+                )
+                continue
+
+            # The runtime-aware audit covers launch argv, package runners,
+            # OAuth endpoints/scopes, token passthrough and protocol schema
+            # constraints.  It is passive: importing it never starts a server.
+            try:
+                from .mcp_runtime import audit_server_config
+
+                for issue in audit_server_config(
+                    str(srv_name),
+                    srv,
+                    location=f"{cfg_path.name}:mcpServers",
+                ):
+                    findings.append(
+                        Finding(
+                            scanner="mcp_runtime",
+                            level=issue.level,
+                            title=f"[{issue.rule_id}] {issue.title}",
+                            detail=issue.detail,
+                            location=issue.location,
+                            remediation=issue.remediation,
+                            metadata={
+                                "rule_id": issue.rule_id,
+                                "component": "mcp_config",
+                                "server": str(srv_name),
+                                "evidence": issue.evidence,
+                            },
+                        )
+                    )
+            except Exception as exc:
+                diagnostic = _scanner_error_finding(
+                    t("MCP 运行时配置审计", "MCP runtime config audit"), exc
+                )
+                diagnostic.location = f"{cfg_path.name}:mcpServers.{srv_name}"
+                diagnostic.metadata.update(
+                    {"scan_status": "error", "component": "mcp_runtime_config"}
+                )
+                findings.append(diagnostic)
+
             url, env = (srv.get("url", ""), srv.get("env", {}))
             if isinstance(url, str):
                 if re.match("https?://(?:0\\.0\\.0\\.0|\\*)", url):
@@ -1760,7 +2914,7 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                             remediation=t("确认可信度。", "Verify trustworthiness."),
                         )
                     )
-            for ek, ev in (env or {}).items():
+            for ek, ev in (env if isinstance(env, dict) else {}).items():
                 if (
                     re.search("(?i)(password|secret|token|api_key)", ek)
                     and len(str(ev)) > 8
@@ -1786,17 +2940,25 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
                             remediation=t(f"移除 {ek}。", f"Remove {ek}."),
                         )
                     )
-            for tool in srv.get("tools", []):
+            inline_tools = srv.get("tools", [])
+            for tool in inline_tools if isinstance(inline_tools, list) else []:
+                if not isinstance(tool, dict):
+                    continue
                 text_fields = {
                     "description": tool.get("description", ""),
                     "annotations": str(tool.get("annotations", "")),
                     "errorTemplate": str(tool.get("errorTemplate", "")),
                     "outputTemplate": str(tool.get("outputTemplate", "")),
                 }
-                for pn, prop in (
-                    tool.get("inputSchema", {}).get("properties", {}).items()
-                ):
-                    text_fields[f"param:{pn}"] = prop.get("description", "")
+                input_schema = tool.get("inputSchema", {})
+                properties = (
+                    input_schema.get("properties", {})
+                    if isinstance(input_schema, dict)
+                    else {}
+                )
+                for pn, prop in properties.items() if isinstance(properties, dict) else []:
+                    if isinstance(prop, dict):
+                        text_fields[f"param:{pn}"] = prop.get("description", "")
                 for fn, text in text_fields.items():
                     if not text:
                         continue
@@ -1818,11 +2980,50 @@ def scan_mcp(adapter: AdapterSpec, extra_mcp: Optional[str] = None) -> List[Find
 
 
 def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
-    """5-dimension auto safety check when importing new SKILL.md."""
-    findings: List[Finding] = []
+    """Fail-closed import precheck plus the full local Skill pipeline."""
     if not skill_md_path.exists():
-        return (findings, True)
-    content = skill_md_path.read_text(encoding="utf-8", errors="ignore")
+        finding = _skill_scan_diagnostic(
+            t("待导入 Skill 不存在", "Skill import target does not exist"),
+            t("未执行任何导入前检查。", "No import precheck was performed."),
+            skill_md_path,
+        )
+        return ([finding], False)
+    scan_target = (
+        skill_md_path.parent if skill_md_path.name == "SKILL.md" else skill_md_path
+    )
+    findings: List[Finding] = scan_skill(scan_target)
+    if skill_md_path.is_symlink():
+        return (findings, False)
+    try:
+        content, truncated, _bytes_read = _read_skill_text_prefix(
+            skill_md_path, _SKILL_MAX_FILE_BYTES
+        )
+    except OSError as exc:
+        findings.append(
+            _skill_scan_diagnostic(
+                t("待导入 SKILL.md 无法读取", "Import SKILL.md could not be read"),
+                str(exc)[:300],
+                skill_md_path,
+            )
+        )
+        return (findings, False)
+    if content is None:
+        findings.append(
+            _skill_scan_diagnostic(
+                t("待导入 SKILL.md 不是文本", "Import SKILL.md is not text"),
+                t("无法执行元数据与指令检查。", "Metadata and instruction checks could not run."),
+                skill_md_path,
+            )
+        )
+        return (findings, False)
+    if truncated:
+        findings.append(
+            _skill_scan_diagnostic(
+                t("待导入 SKILL.md 仅完成前缀检查", "Import SKILL.md was only partially checked"),
+                t("文件超过单文件读取预算。", "The file exceeds the per-file read budget."),
+                skill_md_path,
+            )
+        )
     skill_name = (
         skill_md_path.parent.name
         if skill_md_path.name == "SKILL.md"
@@ -1832,7 +3033,15 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
         candidates = [line]
         candidates.extend(_unwrap_shell_commands(line))
         for candidate in candidates:
-            for compiled_pat, level, title, detail, category in _COMPILED_MALICIOUS_PATTERNS:
+            for (
+                compiled_pat,
+                level,
+                title,
+                detail,
+                category,
+                rule_id,
+                confidence,
+            ) in _COMPILED_MALICIOUS_PATTERNS:
                 if compiled_pat.search(candidate):
                     suffix = t(" (反混淆后发现)", " (found after deobfuscation)") if candidate is not line else ""
                     findings.append(
@@ -1844,7 +3053,11 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
                             f"SKILL.md:{i}",
                             line.strip()[:120],
                             t("安装前仔细审查来源和代码。", "Carefully review the source and code before installing."),
-                            metadata={"category": category},
+                            metadata={
+                                "category": category,
+                                "rule_id": rule_id,
+                                "confidence": confidence,
+                            },
                         )
                     )
                     break
@@ -1922,6 +3135,9 @@ def precheck_skill_md(skill_md_path: Path) -> Tuple[List[Finding], bool]:
                 remediation=t("检查是否包含不必要的嵌入内容。", "Check for unnecessary embedded content."),
             )
         )
-    is_safe = not any((f.level in (CRIT, HIGH) for f in findings))
+    is_safe = not any(
+        f.level in (CRIT, HIGH) or f.metadata.get("scan_status") == "error"
+        for f in findings
+    )
     return (findings, is_safe)
 

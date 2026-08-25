@@ -5,11 +5,12 @@ description: >
   当用户明确要求安全扫描、安全体检、安全加固时触发：
   「开始安全体检」「安全扫描」「检查 skill 安全」「安全加固」「探测实例」
   「scan my claw」「security check」「drift detection」「red team」「红队测试」
-  「React2Shell」「agent-scan」「发现安装」「凭证权限」
+  「React2Shell」「agent-scan」「发现安装」「凭证权限」「mcp-live」
+  「供应链审计」「SLSA」「容器安全」「Kubernetes 审计」「动态分析」
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.5.0"
+    version: "2.6.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -21,6 +22,10 @@ metadata:
         - clawlock    # 主二进制，配合 autoAllowSkills 可自动授权
       bins_optional:
         - promptfoo
+        - osv-scanner
+        - gitleaks
+        - docker
+        - podman
 ---
 
 # ClawLock
@@ -40,8 +45,12 @@ clawlock scan                 # 全面安全扫描
 clawlock discover             # 发现所有安装实例
 clawlock precheck ./SKILL.md  # 新 skill 导入预检
 clawlock harden --auto-fix    # 加固（自动修复真正安全的本地变更）
+clawlock supply-chain ./project # 结构化供应链审计
+clawlock runtime-scan ./deploy  # Docker/Compose/K8s 静态审计
 clawlock scan --format html   # HTML 报告
 ```
+
+当前 CLI 共 **16 个命令**。其中静态检查默认本地、被动执行；MCP live、红队、外部工具适配器和容器动态执行必须由用户显式授权。
 
 作为 Claw Skill 安装：复制本文件到 skills 目录，并在对应 Claw 产品对话中发起安全检查请求。
 
@@ -59,12 +68,16 @@ clawlock scan --format html   # HTML 报告
 | 加固 / 收紧配置 | **Feature 4: 安全加固向导** | 无 |
 | SOUL.md / Memory 文件 drift | **Feature 5: Drift 检测** | 无 |
 | 发现系统上的安装 | **Feature 6: 安装发现** | 无 |
-| 红队 / jailbreak 测试 | **Feature 7: LLM 红队测试** | ⚠️ 需 Node.js + promptfoo / npx |
+| 红队 / jailbreak 测试 | **Feature 7: LLM 红队测试** | ⚠️ 需显式安装 promptfoo |
 | MCP 服务器是否安全 | **Feature 8: MCP 深度扫描** | 无（内建引擎） |
 | React2Shell / CVE-2025-55182 | **Feature 9: 依赖漏洞检查（并入代码扫描）** | 无 |
 | Agent 多智能体安全扫描 | **Feature 10: Agent-Scan** | 无（内建引擎） |
 | 查看扫描历史趋势 | **Feature 11: 扫描历史** | 无 |
 | 持续监控模式 | **Feature 12: 持续监控** | 无 |
+| MCP 真实清单 / rug-pull 漂移 | **Feature 13: MCP Live** | 本地 stdio 或远程连接均需显式授权 |
+| 包、指令图、SBOM、SLSA | **Feature 14: 结构化供应链** | OSV/Gitleaks 可选且不自动下载 |
+| Dockerfile / Compose / Kubernetes 审计 | **Feature 15: 运行时定义审计** | 无（只做静态读取） |
+| 隔离行为分析 | **Feature 16: 动态扫描** | 需 Docker/Podman、固定镜像与 `--execute` |
 
 不要将普通的 Claw 使用、项目调试、依赖安装当作触发本 skill 的理由。
 
@@ -78,14 +91,16 @@ clawlock scan --format html   # HTML 报告
 |----------|----------|----------|------|
 | CVE 情报查询 | 产品名（固定字符串）+ 版本号 | 无文件内容、无凭证、无会话记录 | 无（内建） |
 | Skill 威胁情报查询 | skill 名称 + 来源标签 | 无代码内容、无用户数据 | 无（内建） |
-| Agent-Scan LLM 语义评估（可选） | 代码片段（截断到 8K 字符） | 无完整源码、无凭证 | 需 `--llm` + API key |
-| promptfoo 红队测试（可选） | 测试 Prompt 载荷 | 无本地文件 | 需 Node.js，并通过 promptfoo 或 npx 运行 |
+| Agent-Scan LLM 语义评估（可选） | 经脱敏、截断到 8K 字符的代码/配置片段 | 无完整源码；尽力移除凭证 | 需 `--llm` + API key |
+| promptfoo 红队测试（可选） | 测试 Prompt 载荷 | 无本地文件 | 需显式安装、最好固定版本的 promptfoo |
+| MCP Live HTTP 探测（可选） | MCP initialize 与清单请求、配置中的授权头 | 不调用任何 MCP tool；不发送本地源码 | 需 `--allow-remote` |
 
 离线优先写法：
 
 - 全量扫描离线：`clawlock scan --no-cve --no-redteam`
 - 单体审计离线：`clawlock skill /path/to/skill --no-cloud`
 - 如未启用 `--llm`，Agent-Scan 不会发起 LLM 请求
+- `supply-chain` 的本地结构化检查、`runtime-scan` 与默认网络为 `none` 的 `dynamic-scan` 不会主动访问互联网
 
 在 Claw 产品对话里，必须明确告诉用户：**本次哪些在线能力实际运行了，哪些被跳过了，哪些暂不可用。**
 
@@ -101,6 +116,9 @@ clawlock scan --format html   # HTML 报告
 2. 确认扫描目标是用户明确指定的对象，不要把测试命令误打到生产地址或无关目录。
 3. 如用户明确要求本地优先或离线评估，优先关闭可选在线能力，再继续执行。
 4. 如运行红队测试，先确认当前环境允许访问目标端点，且该目标确实适合做安全测试。
+5. MCP stdio 启动必须有 `--execute`，非本机 HTTP(S) 探测必须有 `--allow-remote`；探测只读取清单，不调用 tool。
+6. `dynamic-scan` 必须使用 `name@sha256:<digest>` 固定镜像并传 `--execute`；禁止 host 网络，也绝不降级到宿主机执行目标代码。
+7. `--trust-snapshot` 会替换后续漂移检测的信任基线，只能在人工复核当前清单后使用。
 
 ---
 
@@ -146,8 +164,12 @@ clawlock version --check-update --json --skill-path /path/to/SKILL.md
 - CVE 接口不可用：继续其余本地扫描，并明确写「本次未完成在线 CVE 匹配」。
 - Skill 云端情报不可用：继续本地静态分析，并明确写「云端情报暂不可用，本结论基于本地规则」。
 - 未启用 `--llm`、缺少 API key，或模型请求失败：保留本地 Agent-Scan 结果，并明确写「LLM 语义评估未执行」或失败原因。
-- 缺少 Node.js / promptfoo / npx / endpoint：跳过红队测试，并明确写「红队测试已跳过」及原因。
+- 缺少 promptfoo / endpoint：跳过红队测试，并明确写「红队测试已跳过」及原因；不要通过 npx 自动下载 latest。
+- 显式请求 OSV-Scanner / Gitleaks 但二进制不存在：不要安装或下载，标记该适配器 **INCOMPLETE**。
+- 未授权 MCP live 启动/远程连接、动态容器执行，或固定镜像/容器引擎不可用：拒绝主动操作并标记 **INCOMPLETE**；不得改在宿主机执行。
+- 制品、指令图或源码遍历达到条目、字节、深度、时间预算，或发生读取/解析错误：保留已取得的证据台账，同时标记 **INCOMPLETE**。
 - 任何检查被跳过、失败或暂不可用时，都**不得**改写成“已通过”或“未发现问题”。
+- 安全聚焦命令退出码：`0`=完整且无严重/高危，`1`=存在严重/高危，`2`=请求的检查 INCOMPLETE。
 
 ---
 
@@ -198,9 +220,9 @@ clawlock scan --no-cve                           # 离线模式
 
 跨平台检查凭证文件/目录是否对其他用户可读（Unix: stat 位, Windows: icacls ACL）。
 
-### Step 4 — Skill 供应链风险扫描
+### Step 4 — Skill 供应链风险扫描（Detection Core v2）
 
-整合**云端威胁情报** + **本地 63 模式静态分析**。
+整合**云端威胁情报** + **本地确定性规则** + **项目级数据流** + **制品证据台账** + **能力链** + **结构化供应链**。
 
 #### 4.1 云端情报查询
 
@@ -216,7 +238,7 @@ clawlock scan --no-cve                           # 离线模式
 
 **韧性规则：** 云端失败不阻断扫描。一个 skill 失败不阻止其他 skill。
 
-#### 4.2 本地静态分析（63 模式）
+#### 4.2 本地规则与项目级多标签数据流
 
 🔴 严重（确认恶意）：凭证外传(curl/wget) · 反弹Shell(bash/nc/Python/mkfifo) · 挖矿 · 批量删除 · chmod 777 · 提示词注入(覆盖/劫持/越狱/中文) · 混淆载荷(base64→shell) · 零宽字符 · Shell 命令嵌套混淆（`sh -c`/`bash -c`/`cmd /c` 多层包装绕过检测）
 
@@ -225,6 +247,19 @@ clawlock scan --no-cve                           # 离线模式
 🟡 警告（高权限但可能合理）：eval/exec · subprocess · 凭证类环境变量 · 隐私目录访问 · 系统敏感文件 · 外部HTTP请求 · 动态模块导入 · ctypes/cffi · pickle反序列化 · 不安全YAML加载 · socket服务端 · webhook · 系统服务注册
 
 **判断原则：** 升级到 🔴 严重**必须**有明确越权、外传、破坏、恶意迹象之一。`eval`、`subprocess`、API 密钥读写**单独存在**时只判 🟡 警告。结合「声明用途 × 实际行为 × 是否外传」综合判断。
+
+Detection Core v2 跟踪不可信输入、密钥、文件路径、网络数据与下载内容经过别名、重新赋值、关键字参数、函数参数/返回值、封装函数及跨文件调用后的流向。数据流 finding 必须给出 source → propagation → sink 的证据路径、文件/行号与置信度；不能因为单个“看起来像 sanitizer”的函数名就静默消除风险。
+
+#### 4.3 制品恢复与证据台账
+
+在条目、字节、深度、压缩比和时间预算内检查 ZIP/TAR/wheel/JAR/OOXML、嵌套归档和可恢复的 `.pyc` 指令。路径穿越、绝对路径、符号/硬链接、加密、重名、压缩炸弹、magic/扩展名不符及源码/字节码不一致均记录在台账。台账含 SHA-256 和 complete/incomplete 状态；达到预算时不得宣称扫描完整。
+
+#### 4.4 能力链与结构化供应链
+
+- 关联“敏感读取 → 对外写入”“下载 → 执行”“记忆写入 → 自启动”“不可信路径 → 写入/执行”等组合能力，并保留底层事件证据。
+- 解析 package.json、pyproject.toml、requirements、lockfile、SBOM、npm lifecycle 与 Python build backend，识别可变依赖和安装期执行。
+- 递归构建外部指令引用图，检查路径逃逸、循环、深度/节点/字节预算、可变远程引用、固定版本和摘要漂移；默认只记录远程引用，不主动获取。
+- 验证 in-toto/SLSA 的 subject 摘要、builder 与 source。DSSE 签名“存在”不等于可信，除非另有独立密钥策略做密码学验证。
 
 **输出要求：**
 - 有风险的 skill 写清：权限 + 用途是否一致 + 建议
@@ -269,7 +304,7 @@ clawlock scan --no-cve                           # 离线模式
 
 9 个 agent 专项插件 × 8 种攻击策略（含编码绕过）。
 
-> ⚠️ **外部依赖：** 此功能需要 Node.js 环境，并通过 `promptfoo` 或 `npx` 运行（例如 `npm install -g promptfoo`，或直接使用 `npx promptfoo@latest`）。如果当前环境无法安装，请跳过此步骤，不影响其余 8 个核心安全域的完整性。Skill 环境中通常无 Node.js，此步会自动跳过并提示原因。
+> ⚠️ **外部依赖：** 此功能需要用户预先显式安装、最好固定版本的 `promptfoo`。ClawLock 不会通过 `npx` 自动下载并执行 latest。若未安装，必须把本次红队阶段标记为未完成；其余本地安全域仍可独立运行。
 
 ---
 
@@ -298,7 +333,7 @@ clawlock skill /path/to/SKILL.md --no-cloud
 - 实际使用的能力：文件读写/删除 · 网络请求 · Shell/子进程 · 敏感访问 (env/凭证/隐私路径)
 - 声明权限 vs 实际使用权限的偏差
 
-**Step 3 — 本地静态分析：** 使用 63 模式引擎确定性扫描，判断原则同 Feature 1 Step 4。
+**Step 3 — 本地确定性分析：** 使用 Detection Core v2 的规则、制品台账、项目级数据流、能力链与结构化供应链，判断原则同 Feature 1 Step 4。
 
 ### 输出规范（严格执行，不展开成全量报告）
 
@@ -459,13 +494,20 @@ clawlock harden --verify
 ```bash
 clawlock soul --update-baseline    # Drift 基准更新
 clawlock discover                  # 安装发现 (~/.openclaw / ~/.zeroclaw / ~/.claude)
-clawlock redteam URL --deep        # 红队 (10 插件 × 8 策略) ⚠️ 需 promptfoo / npx
-clawlock mcp-scan ./src            # MCP 深度代码扫描（含依赖漏洞 / React2Shell 检查）
-clawlock agent-scan --code ./src   # OWASP ASI 14 类别（含依赖漏洞 / React2Shell 检查）
+clawlock redteam URL --deep        # 红队 (10 插件 × 8 策略) ⚠️ 需显式安装 promptfoo
+clawlock mcp-scan ./src            # MCP 深度代码扫描（含项目级数据流）
+clawlock agent-scan --code ./src   # ClawLock ASI 14 兼容规则集（含依赖漏洞检查）
 clawlock agent-scan --code ./src --llm           # 追加 LLM 语义评估层
 ```
 
-> **依赖说明：** 除 `clawlock redteam` 需要 Node.js，并通过 `promptfoo` 或 `npx` 运行外，所有其他命令仅需 `pip install clawlock`，零外部二进制依赖。
+> **依赖说明：** 本地静态能力只需 `pip install clawlock`。`redteam`、供应链外部适配器和动态扫描分别需要用户预先安装 promptfoo、OSV-Scanner/Gitleaks、Docker/Podman；ClawLock 不会自动下载它们。
+
+| 可选工具 | 使用入口 | 安全边界 |
+|----------|----------|----------|
+| promptfoo | `redteam` / 全量扫描可选红队阶段 | 预先安装、建议固定版本；不通过 npx 下载 latest |
+| OSV-Scanner | `supply-chain PATH --osv` | 仅显式启用；缺失时 INCOMPLETE，不自动安装 |
+| Gitleaks | `supply-chain PATH --gitleaks` | 仅显式启用；证据脱敏；缺失时 INCOMPLETE |
+| Docker / Podman | `dynamic-scan` | 固定镜像、`--execute`、受限容器；无宿主执行 fallback |
 
 ---
 
@@ -487,6 +529,52 @@ clawlock watch --count 10         # 扫描 10 轮后自动停止
 ```
 
 定期重扫配置 Drift + 记忆文件 Drift + 进程变化，发现高危变化时即时告警。适合部署后长期监控。
+
+## Feature 13: MCP Live 清单与漂移
+
+```bash
+clawlock mcp-live ./.mcp.json --server local-fs --execute \
+  --snapshot ./mcp-inventory.snapshot.json
+clawlock mcp-live ./.mcp.json --server remote-api --allow-remote \
+  --snapshot ./mcp-inventory.snapshot.json
+```
+
+- 只执行 MCP `initialize`、`tools/list`、`prompts/list` 与 `resources/list`，不调用任何 tool。
+- 本地 stdio Server 只有传 `--execute` 才会启动；非本机 HTTP(S) 只有传 `--allow-remote` 才会连接；未固定启动包默认拒绝，可由用户以高风险选项 `--allow-unpinned` 单独授权。
+- `--trust-snapshot` 只能在人工复核清单后使用。后续扫描比较 tool/prompt/resource 的新增、删除、schema、注解、身份与能力变化，检测 tool shadowing 和 rug-pull 漂移。
+- 可通过 `CLAWLOCK_SNAPSHOT_KEY` 为快照启用 HMAC；未设置时只提供文件权限与内部指纹，不声称能抵抗同权限篡改。
+
+## Feature 14: 结构化供应链、指令图与 SLSA
+
+```bash
+clawlock supply-chain ./project
+clawlock supply-chain ./project --osv --gitleaks
+clawlock supply-chain ./project --provenance ./provenance.json \
+  --expected-digest <sha256> --expected-builder <builder-id> \
+  --expected-source <source-uri> --expected-subject <artifact-name>
+```
+
+默认路径只做本地结构化分析。`--osv` / `--gitleaks` 只调用已安装的二进制，使用参数数组而非 shell，不自动安装；显式请求但不可用时退出 `2`。Gitleaks 证据会脱敏。SLSA 检查验证结构与声明匹配，但不会把未通过独立密钥策略验证的 DSSE 签名称为可信。
+
+## Feature 15: Docker / Compose / Kubernetes 运行时定义审计
+
+```bash
+clawlock runtime-scan ./deploy
+clawlock runtime-scan ./deploy --format json
+```
+
+静态检查 Dockerfile、Compose 与 Kubernetes YAML，不构建镜像、不启动容器、不连接集群。重点覆盖 root/privileged、host namespace、hostPath/socket、危险 capability、提权、seccomp、可写根文件系统、资源限制、hostPort、未固定镜像、构建密钥、download-then-execute 与无边界 egress。读取或解析不完整时退出 `2`。
+
+## Feature 16: 固定镜像容器动态分析
+
+```bash
+clawlock dynamic-scan ./skill \
+  --image clawlock-analyzer@sha256:<digest> \
+  --entrypoint-json '["--","python","/workspace/main.py"]' \
+  --execute
+```
+
+只通过 Docker/Podman 执行，镜像必须用 SHA-256 摘要固定。容器默认只读、非 root、drop all capabilities、`no-new-privileges`、资源/PID/时间上限和 `network=none`；禁止 host 网络且没有宿主执行 fallback。分析器关联敏感读取 + 网络、download + execute、持久化、宿主逃逸、canary 外传及 prompt/tool 注入事件，并对 canary 与输出证据脱敏。缺少授权、固定镜像、容器引擎或完整事件时退出 `2`。
 
 ---
 
@@ -581,12 +669,14 @@ clawlock watch --count 10         # 扫描 10 轮后自动停止
 
 ## 能力边界声明
 
-本 skill 执行**静态分析**，无法：
-- 检测纯运行时的恶意行为
+本 skill 以**静态分析**为默认；只有 Feature 13/16 经明确授权后才执行 live 协议清单或隔离容器行为分析。它无法：
+- 在未执行到、被环境规避或超出预算时观察所有运行态行为
 - 保证不存在未知漏洞
-- 执行真实攻击或确认漏洞可利用性
+- 在未授权目标上执行真实攻击或确认漏洞可利用性
 - 读取系统隐私目录、会话记录、媒体文件
 
-MCP 深度扫描和 Agent-Scan 使用内建 Python 引擎（正则 + AST 污点追踪），零外部二进制依赖。内建引擎基于已知模式匹配，对复杂的跨函数语义漏洞覆盖有限；如需 LLM 驱动的语义级分析，可通过 `--llm` 选项启用（需要 API key）。
+MCP 深度扫描、Skill 审计和 Agent-Scan 复用 Detection Core v2 的确定性规则、AST 项目级多标签数据流、证据路径和能力链。归档/嵌套/`.pyc` 由受预算约束的证据台账覆盖。LLM 语义层仍是可选的加法项，不能删除、降级或覆盖确定性 finding。
+
+主动功能不自动下载工具、不调用 MCP tool、不在宿主机执行不可信目标代码。任何 INCOMPLETE 都必须保留原状态并按退出码 `2` 处理。
 
 所有结论均为「当前检查范围内」的最佳评估。

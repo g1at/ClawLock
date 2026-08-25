@@ -6,13 +6,17 @@ Windows, macOS, Linux, and Android (Termux).
 from __future__ import annotations
 import os
 import platform
-import shutil
+import re
 import sqlite3
+import stat
 import subprocess
 import tempfile
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # ─── Platform detection ───────────────────────────────────────────────────────
 
@@ -25,6 +29,285 @@ IS_ANDROID = IS_LINUX and (
     or "TERMUX_VERSION" in os.environ
     or Path("/data/data/com.termux").exists()
 )
+
+_DEFAULT_COMMAND_OUTPUT_LIMIT = 1024 * 1024
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
+
+
+class CommandOutputTruncated(RuntimeError):
+    """An external command exceeded ClawLock's capture budget."""
+
+    def __init__(self, command: Sequence[str], limit: int):
+        self.command = tuple(command)
+        self.limit = limit
+        super().__init__(
+            f"external command output exceeded the {limit}-byte safety limit"
+        )
+
+
+@dataclass(frozen=True)
+class BoundedCommandResult:
+    """Small, compatibility-friendly result returned by ``run_bounded_command``."""
+
+    args: List[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Return whether *path* is lexically inside *root*, case-insensitively on NT."""
+    try:
+        path_text = os.path.normcase(os.path.abspath(os.fspath(path)))
+        root_text = os.path.normcase(os.path.abspath(os.fspath(root)))
+        return os.path.commonpath((path_text, root_text)) == root_text
+    except (OSError, ValueError):
+        return False
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
+
+
+def _trusted_binary_candidate(
+    candidate: Path,
+    *,
+    untrusted_roots: Sequence[Path],
+) -> Optional[str]:
+    """Validate without following a final symlink/reparse point."""
+    if not candidate.is_absolute():
+        return None
+    lexical = Path(os.path.abspath(os.fspath(candidate)))
+    if _is_link_or_reparse(lexical):
+        return None
+    try:
+        canonical = Path(os.path.realpath(os.fspath(lexical)))
+    except OSError:
+        return None
+    if any(
+        _is_within(lexical, root)
+        or _is_within(canonical, Path(os.path.realpath(os.fspath(root))))
+        for root in untrusted_roots
+    ):
+        return None
+    try:
+        info = lexical.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return str(lexical)
+
+
+def _binary_name_candidates(name: str) -> List[str]:
+    if not IS_WINDOWS:
+        return [name]
+    suffixes = [
+        item.strip()
+        for item in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+        if re.fullmatch(r"\.[A-Za-z0-9]+", item.strip())
+    ]
+    if not suffixes:
+        suffixes = [".COM", ".EXE", ".BAT", ".CMD"]
+    if Path(name).suffix:
+        return [name]
+    return [f"{name}{suffix.lower()}" for suffix in suffixes] + [
+        f"{name}{suffix.upper()}" for suffix in suffixes
+    ]
+
+
+def resolve_trusted_binary(
+    name: str,
+    *,
+    path: Optional[str] = None,
+    untrusted_roots: Optional[Sequence[Path]] = None,
+) -> Optional[str]:
+    """Resolve an executable without current-directory or link hijacking.
+
+    Unlike ``shutil.which`` on Windows, this resolver never searches the
+    current directory implicitly. Empty and relative PATH entries are ignored,
+    and candidates inside the working (normally scanned) repository are
+    rejected. Explicit absolute paths go through the same validation.
+    """
+    raw = str(name or "").strip().strip('"')
+    if not raw:
+        return None
+    roots = [Path(root) for root in (untrusted_roots or ())]
+    try:
+        roots.append(Path.cwd())
+    except OSError:
+        pass
+
+    supplied = Path(raw).expanduser()
+    has_separator = any(separator in raw for separator in (os.sep, os.altsep) if separator)
+    # Backslashes are separators even when tests emulate Windows on POSIX.
+    has_separator = has_separator or "\\" in raw
+    if supplied.is_absolute():
+        return _trusted_binary_candidate(supplied, untrusted_roots=roots)
+    if has_separator:
+        return None
+
+    path_value = os.environ.get("PATH", "") if path is None else path
+    seen = set()
+    for entry in path_value.split(os.pathsep):
+        clean = entry.strip().strip('"')
+        if not clean:
+            continue
+        directory = Path(clean).expanduser()
+        if not directory.is_absolute():
+            continue
+        for binary_name in _binary_name_candidates(raw):
+            candidate = directory / binary_name
+            marker = os.path.normcase(os.path.abspath(os.fspath(candidate)))
+            if marker in seen:
+                continue
+            seen.add(marker)
+            resolved = _trusted_binary_candidate(candidate, untrusted_roots=roots)
+            if resolved:
+                return resolved
+    return None
+
+
+def _redact_url(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    trailing = ""
+    while raw and raw[-1] in ".,;)]}":
+        trailing = raw[-1] + trailing
+        raw = raw[:-1]
+    try:
+        parsed = urlsplit(raw)
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = "[REDACTED]@" + netloc.rsplit("@", 1)[1]
+        query = urlencode(
+            [(key, "[REDACTED]") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)]
+        )
+        fragment = "[REDACTED]" if parsed.fragment else ""
+        return urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment)) + trailing
+    except (TypeError, ValueError):
+        return "[REDACTED-URL]" + trailing
+
+
+def scrub_command_diagnostic(value: object, *, max_chars: int = 500) -> str:
+    """Remove common credentials before surfacing child-process diagnostics."""
+    text = str(value or "")
+    text = _URL.sub(_redact_url, text)
+    text = re.sub(
+        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+        "Authorization: [REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer [REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\b[A-Za-z_][A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_.-]*\s*=\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([\"']?[A-Za-z_][A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_.-]*[\"']?\s*:\s*)"
+        r"(?:\"[^\"]*\"|'[^']*')",
+        r"\1\"[REDACTED]\"",
+        text,
+    )
+    return text.strip()[:max_chars]
+
+
+def run_bounded_command(
+    command: Sequence[str],
+    *,
+    timeout: float,
+    max_output_bytes: int = _DEFAULT_COMMAND_OUTPUT_LIMIT,
+    cwd: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> BoundedCommandResult:
+    """Execute with bounded streaming capture and fail closed on truncation."""
+    if not command:
+        raise ValueError("external command is empty")
+    if max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be positive")
+    untrusted_roots = [Path(cwd)] if cwd is not None else None
+    binary = resolve_trusted_binary(
+        str(command[0]), untrusted_roots=untrusted_roots
+    )
+    if binary is None:
+        raise FileNotFoundError(f"untrusted or unavailable executable: {command[0]}")
+    actual = [binary, *(str(item) for item in command[1:])]
+    process = subprocess.Popen(
+        actual,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=dict(env) if env is not None else None,
+        shell=False,
+    )
+    buffers = [bytearray(), bytearray()]
+    truncated = [False, False]
+    reader_errors: List[BaseException] = []
+
+    def drain(index: int, stream) -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                remaining = max_output_bytes - len(buffers[index])
+                if remaining > 0:
+                    buffers[index].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated[index] = True
+        except BaseException as exc:  # pragma: no cover - exceptional OS pipe failure
+            reader_errors.append(exc)
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    threads = [
+        threading.Thread(target=drain, args=(0, process.stdout), daemon=True),
+        threading.Thread(target=drain, args=(1, process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        for thread in threads:
+            thread.join(timeout=2)
+        raise subprocess.TimeoutExpired(actual, timeout) from exc
+    for thread in threads:
+        thread.join(timeout=2)
+    if any(thread.is_alive() for thread in threads) or reader_errors:
+        raise RuntimeError("external command output stream could not be drained safely")
+    if any(truncated):
+        raise CommandOutputTruncated(actual, max_output_bytes)
+    return BoundedCommandResult(
+        args=actual,
+        returncode=returncode,
+        stdout=bytes(buffers[0]).decode("utf-8", errors="replace"),
+        stderr=bytes(buffers[1]).decode("utf-8", errors="replace"),
+    )
 
 
 def platform_label() -> str:
@@ -48,83 +331,105 @@ def temp_path(filename: str) -> Path:
 # ─── Process detection (cross-platform) ──────────────────────────────────────
 
 
-def list_processes() -> List[Dict[str, str]]:
-    """Return list of running processes as [{pid, user, cmd}]."""
-    procs: List[Dict[str, str]] = []
+def _run_system_probe(command: List[str], probe_name: str) -> BoundedCommandResult:
+    """Run an OS inventory command without turning failure into an empty result."""
     try:
-        if IS_WINDOWS:
-            r = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if r.returncode == 0:
-                for line in r.stdout.splitlines():
-                    parts = line.strip().strip('"').split('","')
-                    if len(parts) >= 2:
-                        procs.append({"cmd": parts[0], "pid": parts[1], "user": ""})
-        else:
-            r = subprocess.run(
-                ["ps", "aux"] if not IS_ANDROID else ["ps", "-e"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if r.returncode == 0:
-                for line in r.stdout.splitlines()[1:]:  # skip header
-                    parts = line.split(None, 10)
-                    if len(parts) >= 2:
-                        procs.append(
-                            {
-                                "user": parts[0],
-                                "pid": parts[1],
-                                "cmd": parts[-1] if len(parts) > 2 else parts[1],
-                            }
-                        )
-    except Exception:
-        pass
+        result = run_bounded_command(
+            command,
+            timeout=10,
+            max_output_bytes=2 * 1024 * 1024,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"{probe_name} probe unavailable: command not found: {command[0]}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{probe_name} probe timed out while running {command[0]}"
+        ) from exc
+    except CommandOutputTruncated as exc:
+        raise RuntimeError(
+            f"{probe_name} probe output exceeded its safety limit"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"{probe_name} probe could not start {command[0]}: "
+            f"{scrub_command_diagnostic(exc, max_chars=240)}"
+        ) from exc
+
+    if result.returncode != 0:
+        detail = scrub_command_diagnostic(
+            result.stderr or result.stdout or "no diagnostic output", max_chars=240
+        )
+        raise RuntimeError(
+            f"{probe_name} probe failed (exit {result.returncode}): {detail}"
+        )
+    return result
+
+
+def list_processes() -> List[Dict[str, str]]:
+    """Return running processes, or raise if OS inventory was incomplete."""
+    procs: List[Dict[str, str]] = []
+    if IS_WINDOWS:
+        result = _run_system_probe(
+            ["tasklist", "/FO", "CSV", "/NH"], "process inventory"
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2:
+                procs.append({"cmd": parts[0], "pid": parts[1], "user": ""})
+    else:
+        result = _run_system_probe(
+            ["ps", "aux"] if not IS_ANDROID else ["ps", "-e"],
+            "process inventory",
+        )
+        for line in result.stdout.splitlines()[1:]:  # skip header
+            parts = line.split(None, 10)
+            if len(parts) >= 2:
+                procs.append(
+                    {
+                        "user": parts[0],
+                        "pid": parts[1],
+                        "cmd": parts[-1] if len(parts) > 2 else parts[1],
+                    }
+                )
     return procs
 
 
 def list_listening_ports() -> List[str]:
-    """Return lines describing ports listening on 0.0.0.0 / all interfaces."""
+    """Return exposed listeners, or raise if OS inventory was incomplete."""
     lines: List[str] = []
-    try:
-        if IS_WINDOWS:
-            r = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True,
-                text=True,
-                timeout=10,
+    if IS_WINDOWS:
+        result = _run_system_probe(["netstat", "-ano"], "listening-port inventory")
+        for line in result.stdout.splitlines():
+            if "LISTENING" in line and "0.0.0.0" in line:
+                lines.append(line.strip())
+    elif IS_MACOS:
+        result = _run_system_probe(
+            ["lsof", "-iTCP", "-sTCP:LISTEN", "-nP"],
+            "listening-port inventory",
+        )
+        for line in result.stdout.splitlines():
+            if "*:" in line or "0.0.0.0:" in line:
+                lines.append(line.strip())
+    else:
+        command = next(
+            (
+                candidate
+                for candidate in (["ss", "-tlnp"], ["netstat", "-tlnp"])
+                if find_binary(candidate[0])
+            ),
+            None,
+        )
+        if command is None:
+            raise RuntimeError(
+                "listening-port inventory probe unavailable: neither ss nor "
+                "netstat was found"
             )
-            if r.returncode == 0:
-                for line in r.stdout.splitlines():
-                    if "LISTENING" in line and "0.0.0.0" in line:
-                        lines.append(line.strip())
-        elif IS_MACOS:
-            r = subprocess.run(
-                ["lsof", "-iTCP", "-sTCP:LISTEN", "-nP"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if r.returncode == 0:
-                for line in r.stdout.splitlines():
-                    if "*:" in line or "0.0.0.0:" in line:
-                        lines.append(line.strip())
-        else:
-            # Linux / Android
-            for cmd in [["ss", "-tlnp"], ["netstat", "-tlnp"]]:
-                if shutil.which(cmd[0]):
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                    if r.returncode == 0:
-                        for line in r.stdout.splitlines():
-                            if "0.0.0.0" in line:
-                                lines.append(line.strip())
-                        break
-    except Exception:
-        pass
+        result = _run_system_probe(command, "listening-port inventory")
+        for line in result.stdout.splitlines():
+            if "0.0.0.0" in line:
+                lines.append(line.strip())
     return lines
 
 
@@ -160,11 +465,10 @@ def _check_perm_unix(path: Path) -> Tuple[bool, bool, str]:
 def _check_perm_windows(path: Path) -> Tuple[bool, bool, str]:
     """Use icacls on Windows to check ACLs."""
     try:
-        r = subprocess.run(
+        r = run_bounded_command(
             ["icacls", str(path)],
-            capture_output=True,
-            text=True,
             timeout=10,
+            max_output_bytes=1024 * 1024,
         )
         if r.returncode == 0:
             output = r.stdout.lower()
@@ -190,30 +494,134 @@ def fix_file_permission(path: Path, private: bool = True) -> bool:
     On Windows: icacls to remove Everyone/Users access.
     """
     try:
+        # Permission hardening must never follow a link outside the expected
+        # credential tree.  Callers can surface the refusal and ask the user to
+        # inspect the link manually.
+        if not path.exists() or path.is_symlink():
+            return False
         if IS_WINDOWS:
-            # Remove inheritance + remove Everyone/Users
-            subprocess.run(
+            username = os.environ.get("USERNAME", "").strip()
+            if not username:
+                return False
+            # Use well-known SIDs instead of localized account names for the
+            # broad principals.  Most importantly, check icacls' return code:
+            # the old implementation reported success even on a partial/failed
+            # ACL rewrite.
+            result = run_bounded_command(
                 [
                     "icacls",
                     str(path),
                     "/inheritance:r",
                     "/grant:r",
-                    f"{os.environ.get('USERNAME', 'User')}:(F)",
-                    "/remove",
-                    "Everyone",
-                    "/remove",
-                    "Users",
+                    f"{username}:(F)",
+                    "/remove:g",
+                    "*S-1-1-0",       # Everyone
+                    "*S-1-5-32-545",  # BUILTIN\\Users
                 ],
-                capture_output=True,
                 timeout=10,
+                max_output_bytes=1024 * 1024,
             )
-            return True
-        else:
-            if path.is_dir():
-                os.chmod(path, 0o700)
-            else:
-                os.chmod(path, 0o600)
-            return True
+            return result.returncode == 0
+
+        target_mode = 0o700 if path.is_dir() else 0o600
+        os.chmod(path, target_mode)
+        import stat
+
+        return stat.S_IMODE(path.stat().st_mode) == target_mode
+    except Exception:
+        return False
+
+
+# Stable identity used by hardening's dependency-injection compatibility path.
+# A caller that replaces ``fix_file_permission`` with a dry-run callback should
+# not cause the callback's unit test to execute real ACL snapshot commands.
+_SYSTEM_FIX_FILE_PERMISSION = fix_file_permission
+
+
+def capture_file_permission(
+    path: Path, snapshot_path: Optional[Path] = None
+) -> Optional[Dict[str, object]]:
+    """Capture enough permission state to restore *path* later.
+
+    Unix stores the exact mode bits in the hardening action log.  Windows uses
+    ``icacls /save`` and stores the durable ACL snapshot path plus its restore
+    root.  Symlinks are rejected so a privileged hardening run cannot be
+    redirected outside the intended tree.
+    """
+    try:
+        if not path.exists() or path.is_symlink():
+            return None
+        if IS_WINDOWS:
+            if snapshot_path is None:
+                return None
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            result = run_bounded_command(
+                [
+                    "icacls",
+                    path.name,
+                    "/save",
+                    str(snapshot_path),
+                    "/c",
+                    "/q",
+                ],
+                cwd=str(path.parent),
+                timeout=10,
+                max_output_bytes=1024 * 1024,
+            )
+            if (
+                result.returncode != 0
+                or not snapshot_path.exists()
+                or snapshot_path.stat().st_size == 0
+            ):
+                return None
+            return {
+                "platform": "windows",
+                "acl_file": str(snapshot_path),
+                "restore_root": str(path.parent),
+            }
+
+        import stat
+
+        return {
+            "platform": "unix",
+            "mode": stat.S_IMODE(path.stat().st_mode),
+        }
+    except Exception:
+        return None
+
+
+def restore_file_permission(path: Path, snapshot: Dict[str, object]) -> bool:
+    """Restore a permission snapshot created by ``capture_file_permission``."""
+    try:
+        if not path.exists() or path.is_symlink():
+            return False
+        platform_name = str(snapshot.get("platform", ""))
+        if platform_name == "windows":
+            acl_file = Path(str(snapshot.get("acl_file", "")))
+            restore_root = Path(str(snapshot.get("restore_root", "")))
+            if not acl_file.is_file() or not restore_root.is_dir():
+                return False
+            result = run_bounded_command(
+                [
+                    "icacls",
+                    str(restore_root),
+                    "/restore",
+                    str(acl_file),
+                    "/c",
+                    "/q",
+                ],
+                timeout=10,
+                max_output_bytes=1024 * 1024,
+            )
+            return result.returncode == 0
+        if platform_name != "unix":
+            return False
+
+        mode = int(snapshot["mode"])
+        os.chmod(path, mode)
+        import stat
+
+        return stat.S_IMODE(path.stat().st_mode) == mode
     except Exception:
         return False
 
@@ -222,13 +630,13 @@ def fix_file_permission(path: Path, private: bool = True) -> bool:
 
 
 def find_binary(name: str) -> Optional[str]:
-    """Find a binary in PATH, cross-platform."""
-    return shutil.which(name)
+    """Find a trusted binary in PATH, returning an absolute regular file."""
+    return resolve_trusted_binary(name)
 
 
 def find_all_binaries(names: List[str]) -> Dict[str, Optional[str]]:
     """Find multiple binaries."""
-    return {name: shutil.which(name) for name in names}
+    return {name: find_binary(name) for name in names}
 
 
 # ─── Device fingerprint (privacy-preserving) ────────────────────────────────
@@ -265,10 +673,13 @@ CREATE TABLE IF NOT EXISTS scans (
     time TEXT NOT NULL,
     adapter TEXT NOT NULL DEFAULT '',
     device TEXT NOT NULL DEFAULT '',
-    score INTEGER NOT NULL DEFAULT 0,
+    score INTEGER DEFAULT NULL,
     critical INTEGER NOT NULL DEFAULT 0,
     warning INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0
+    total INTEGER NOT NULL DEFAULT 0,
+    complete INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'complete',
+    partial_score INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_scans_time ON scans(time);
 
@@ -286,6 +697,80 @@ CREATE INDEX IF NOT EXISTS idx_findings_level ON findings(level);
 """
 
 
+def _migrate_scan_history_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade pre-status history databases without losing old records."""
+    columns = {
+        row[1]: row for row in conn.execute("PRAGMA table_info(scans)").fetchall()
+    }
+    score_column = columns.get("score")
+
+    # SQLite cannot remove a NOT NULL constraint in place. Rebuild only the
+    # legacy scans table; explicit ids preserve the findings foreign keys.
+    if score_column is not None and bool(score_column[3]):
+        complete_expr = "complete" if "complete" in columns else "1"
+        status_expr = "status" if "status" in columns else "'complete'"
+        partial_score_expr = (
+            "partial_score" if "partial_score" in columns else "NULL"
+        )
+        foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP TABLE IF EXISTS scans_v2")
+            conn.execute(
+                """
+                CREATE TABLE scans_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time TEXT NOT NULL,
+                    adapter TEXT NOT NULL DEFAULT '',
+                    device TEXT NOT NULL DEFAULT '',
+                    score INTEGER DEFAULT NULL,
+                    critical INTEGER NOT NULL DEFAULT 0,
+                    warning INTEGER NOT NULL DEFAULT 0,
+                    total INTEGER NOT NULL DEFAULT 0,
+                    complete INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'complete',
+                    partial_score INTEGER DEFAULT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO scans_v2 (
+                    id, time, adapter, device, score, critical, warning, total,
+                    complete, status, partial_score
+                )
+                SELECT
+                    id, time, adapter, device, score, critical, warning, total,
+                    {complete_expr}, {status_expr}, {partial_score_expr}
+                FROM scans
+                """
+            )
+            conn.execute("DROP TABLE scans")
+            conn.execute("ALTER TABLE scans_v2 RENAME TO scans")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_time ON scans(time)")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            if foreign_keys_enabled:
+                conn.execute("PRAGMA foreign_keys = ON")
+        columns = {
+            row[1]: row
+            for row in conn.execute("PRAGMA table_info(scans)").fetchall()
+        }
+
+    additions = {
+        "complete": "INTEGER NOT NULL DEFAULT 1",
+        "status": "TEXT NOT NULL DEFAULT 'complete'",
+        "partial_score": "INTEGER DEFAULT NULL",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE scans ADD COLUMN {name} {declaration}")
+
+
 @contextmanager
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +781,7 @@ def _connect():
             stmt = stmt.strip()
             if stmt:
                 conn.execute(stmt)
+        _migrate_scan_history_schema(conn)
         yield conn
     finally:
         conn.close()
@@ -331,8 +817,9 @@ def _import_legacy_history_once() -> None:
                     if not isinstance(r, dict):
                         continue
                     cur = conn.execute(
-                        "INSERT INTO scans (time, adapter, device, score, critical, warning, total) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO scans ("
+                        "time, adapter, device, score, critical, warning, total, complete, status"
+                        ") VALUES (?,?,?,?,?,?,?,?,?)",
                         (
                             str(r.get("time", "")),
                             str(r.get("adapter", "")),
@@ -341,6 +828,8 @@ def _import_legacy_history_once() -> None:
                             int(r.get("critical", 0)),
                             int(r.get("warning", 0)),
                             int(r.get("total", 0)),
+                            1,
+                            "complete",
                         ),
                     )
                     scan_id = cur.lastrowid
@@ -372,30 +861,44 @@ def _import_legacy_history_once() -> None:
 
 def record_scan(
     adapter: str,
-    score: int,
+    score: int | None,
     critical: int,
     warning: int,
     findings_total: int,
     findings_summary: list | None = None,
+    *,
+    complete: bool = True,
+    status: str | None = None,
+    partial_score: int | None = None,
 ):
     """Append a scan result to persistent history (SQLite-backed)."""
     import json as _json
     from datetime import datetime
 
     _import_legacy_history_once()
+    normalized_status = status or ("complete" if complete else "incomplete")
+    persisted_score = int(score) if complete and score is not None else None
+    persisted_partial_score = (
+        int(partial_score) if partial_score is not None else None
+    )
     try:
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO scans (time, adapter, device, score, critical, warning, total) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO scans ("
+                "time, adapter, device, score, critical, warning, total, "
+                "complete, status, partial_score"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     datetime.now().isoformat(),
                     adapter,
                     device_fingerprint(),
-                    int(score),
+                    persisted_score,
                     int(critical),
                     int(warning),
                     int(findings_total),
+                    int(complete),
+                    normalized_status,
+                    persisted_partial_score,
                 ),
             )
             scan_id = cur.lastrowid
@@ -430,7 +933,8 @@ def get_scan_history(limit: int = 20) -> list:
         with _connect() as conn:
             rows = list(
                 conn.execute(
-                    "SELECT id, time, adapter, device, score, critical, warning, total "
+                    "SELECT id, time, adapter, device, score, critical, warning, total, "
+                    "complete, status, partial_score "
                     "FROM scans ORDER BY id DESC LIMIT ?",
                     (int(limit),),
                 )
@@ -438,7 +942,19 @@ def get_scan_history(limit: int = 20) -> list:
     except Exception:
         return out
     for row in reversed(rows):
-        scan_id, t_iso, adapter, device, score, critical, warning, total = row
+        (
+            scan_id,
+            t_iso,
+            adapter,
+            device,
+            score,
+            critical,
+            warning,
+            total,
+            complete,
+            status,
+            partial_score,
+        ) = row
         findings: list = []
         try:
             with _connect() as conn:
@@ -466,6 +982,9 @@ def get_scan_history(limit: int = 20) -> list:
                 "critical": critical,
                 "warning": warning,
                 "total": total,
+                "complete": bool(complete),
+                "status": status or ("complete" if complete else "incomplete"),
+                "partial_score": partial_score,
                 "findings": findings,
             }
         )

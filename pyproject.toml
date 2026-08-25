@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawlock"
-version = "2.5.0"
+version = "2.6.0"
 description = "Comprehensive security scanner, red-teamer & hardening toolkit for Claw-based AI agent deployments"
 readme = "README.md"
 license = {text = "Apache-2.0 OR MIT"}
@@ -18,10 +18,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Security",
 ]
-dependencies = ["typer>=0.12", "rich>=13.0", "pyyaml>=6.0", "httpx>=0.25"]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "httpx>=0.25",
+    "tomli>=2.0; python_version<'3.11'",
+]
 
 [project.optional-dependencies]
-redteam = ["promptfoo>=0.80"]
+# promptfoo is a Node.js CLI, not a Python dependency.  Keep the extra for
+# backwards-compatible installs; operators install a pinned promptfoo binary.
+redteam = []
 dev = ["pytest>=7.0", "ruff>=0.3", "mypy>=1.8"]
 
 [project.scripts]

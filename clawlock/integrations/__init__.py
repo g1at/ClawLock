@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.5.0 integrations — cloud intelligence and Agent-Scan.
+ClawLock v2.6.0 integrations — cloud intelligence and Agent-Scan.
 """
 
 from __future__ import annotations
@@ -163,9 +163,10 @@ def run_agent_scan(
     config: dict = None,
     code_path: Path = None,
     enable_llm: bool = False,
+    adapter_name: str = "",
 ) -> list[Finding]:
     """
-    OWASP ASI 14-category Agent security scan.
+    ClawLock ASI 14 compatibility-profile Agent security scan.
 
     Strategy:
     - Built-in engine always runs applicable layers
@@ -179,5 +180,6 @@ def run_agent_scan(
         llm_token=token,
         llm_base_url=base_url or "",
         enable_llm=enable_llm,
+        adapter_name=adapter_name,
     )
     return findings

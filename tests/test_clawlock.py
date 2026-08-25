@@ -20,7 +20,7 @@ class TestCliEntry:
         assert result.exit_code == 0
         assert "Agent Security Enforcement" in result.stdout
         assert "██████╗██╗" in result.stdout
-        assert "v2.5.0" in result.stdout
+        assert "v2.6.0" in result.stdout
         assert "g0at" in result.stdout
 
     def test_root_help_still_shows_help(self):
@@ -39,7 +39,7 @@ class TestCliEntry:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.5.0"
+    version: "2.6.0"
     homepage: "https://github.com/g1at/ClawLock"
 ---
 """,
@@ -50,7 +50,7 @@ metadata:
 
         def _fake_http_get_json(url, timeout=5.0):
             if "pypi.org" in url:
-                return {"info": {"version": "2.6.0"}}
+                return {"info": {"version": "2.7.0"}}
             raise AssertionError(url)
 
         def _fake_http_get_text(url, timeout=5.0):
@@ -62,7 +62,7 @@ metadata:
 name: clawlock
 metadata:
   clawlock:
-    version: "2.6.0"
+    version: "2.7.0"
 ---
 """
 
@@ -81,12 +81,12 @@ metadata:
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["package"]["latest_version"] == "2.6.0"
+        assert payload["package"]["latest_version"] == "2.7.0"
         assert payload["package"]["update_available"] is True
-        assert payload["skill"]["local_version"] == "2.5.0"
-        assert payload["skill"]["latest_version"] == "2.6.0"
+        assert payload["skill"]["local_version"] == "2.6.0"
+        assert payload["skill"]["latest_version"] == "2.7.0"
         assert payload["skill"]["remote_url"] == "https://raw.githubusercontent.com/g1at/ClawLock/main/skill/SKILL.md"
-        assert payload["skill"]["installed_package_version"] == "2.5.0"
+        assert payload["skill"]["installed_package_version"] == "2.6.0"
         assert payload["skill"]["matches_installed_package"] is True
         assert "pip install -U clawlock" in payload["suggested_updates"]
         assert (
@@ -144,7 +144,9 @@ class TestReports:
         )
         monkeypatch.setattr(utils, "device_fingerprint", lambda: "deadbeefcafe")
         monkeypatch.setattr(
-            utils, "record_scan", lambda adapter, score, high, warn, total, findings_summary=None: None
+            utils,
+            "record_scan",
+            lambda adapter, score, high, warn, total, findings_summary=None, **_kwargs: None,
         )
 
         reporters.render_scan_report(
@@ -528,7 +530,15 @@ class TestAdapters:
         binary_name = "openclaw.exe" if adapters.IS_WINDOWS else "openclaw"
         candidate = tmp_path / binary_name
         candidate.write_text("")
-        monkeypatch.setattr(adapters, "find_binary", lambda name: None)
+        monkeypatch.setattr(
+            adapters,
+            "find_binary",
+            lambda name: (
+                str(Path(name).resolve())
+                if Path(name).is_absolute() and Path(name).is_file()
+                else None
+            ),
+        )
         monkeypatch.setattr(adapters, "_binary_search_roots", lambda spec: [tmp_path])
         assert adapters._resolve_binary_path(adapters.get_adapter("openclaw")) == str(
             candidate
@@ -1332,11 +1342,36 @@ class TestPlatformUtils:
 
         assert find_binary("python3") is not None or find_binary("python") is not None
 
-    def test_list_processes(self):
-        from clawlock.utils import list_processes
+    def test_list_processes(self, monkeypatch):
+        from types import SimpleNamespace
 
-        procs = list_processes()
-        assert isinstance(procs, list)
+        import pytest
+
+        import clawlock.utils as utils
+
+        monkeypatch.setattr(utils, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            utils,
+            "run_bounded_command",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0,
+                stdout='"python.exe","123","Console","1","10 K"\n',
+                stderr="",
+            ),
+        )
+        assert utils.list_processes() == [
+            {"cmd": "python.exe", "pid": "123", "user": ""}
+        ]
+
+        monkeypatch.setattr(
+            utils,
+            "run_bounded_command",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=5, stdout="", stderr="access denied"
+            ),
+        )
+        with pytest.raises(RuntimeError, match="exit 5"):
+            utils.list_processes()
 
     def test_list_listening_ports(self):
         from clawlock.utils import list_listening_ports
@@ -1353,13 +1388,28 @@ class TestPlatformUtils:
         assert isinstance(world_r, bool)
         assert isinstance(desc, str)
 
-    def test_fix_file_permission(self, tmp_path):
+    def test_fix_file_permission(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
         f = tmp_path / "secret.key"
         f.write_text("secret")
-        from clawlock.utils import fix_file_permission
+        import clawlock.utils as utils
 
-        result = fix_file_permission(f, private=True)
-        assert result is True
+        monkeypatch.setattr(utils, "IS_WINDOWS", True)
+        monkeypatch.setenv("USERNAME", "tester")
+        monkeypatch.setattr(
+            utils,
+            "run_bounded_command",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        assert utils.fix_file_permission(f, private=True) is True
+
+        monkeypatch.setattr(
+            utils,
+            "run_bounded_command",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=5),
+        )
+        assert utils.fix_file_permission(f, private=True) is False
 
 
 class TestDeviceFingerprint:
@@ -1574,8 +1624,8 @@ class TestScanHistory:
         findings = scan_mcp_source(tmp_path)
         assert any(("RCE" in f.title and "eval" in f.title) for f in findings)
 
-    def test_sanitizer_untaints_value(self, tmp_path):
-        """shlex.quote(tainted) is a recognised sanitizer — must NOT fire CMDI."""
+    def test_shlex_quote_does_not_authorize_an_untrusted_command(self, tmp_path):
+        """Quoting shell metacharacters does not restrict the executable name."""
         from clawlock.scanners.mcp_deep import scan_mcp_source
 
         (tmp_path / "safe.py").write_text(
@@ -1585,7 +1635,7 @@ class TestScanHistory:
             "    os.system(safe)\n"
         )
         findings = scan_mcp_source(tmp_path)
-        assert not any(
+        assert any(
             ("os.system" in f.title and f.level in ("critical", "high"))
             for f in findings
         )

@@ -5,7 +5,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android%20(Termux)-lightgrey.svg)]()
 
-**ClawLock** is a security scanner, hardening wizard, MCP source auditor, and OWASP ASI agent scanner for Claw-family AI agent deployments. It supports **OpenClaw**, **ZeroClaw**, **Claude Code**, and compatible environments.
+**ClawLock** is a security scanner, hardening wizard, MCP source auditor, and ASI compatibility-profile agent scanner for Claw-family AI agent deployments. It supports **OpenClaw**, **ZeroClaw**, **Claude Code**, and compatible environments.
 
 It is designed for both professional security users and everyday operators:
 
@@ -15,10 +15,14 @@ It is designed for both professional security users and everyday operators:
 
 ## Highlights
 
-- **12 CLI commands** covering full scan, single-skill audit, hardening, history, watch mode, MCP scan, and Agent-Scan
+- **16 CLI commands** covering full scan, single-skill audit, hardening, history, watch mode, MCP, supply-chain, runtime, and dynamic analysis
 - **8 concurrent core security domains** in `clawlock scan`, plus an optional red-team stage
-- **Built-in MCP deep scan engine** with regex + AST analysis across 14 risk categories
-- **Built-in OWASP ASI 14 Agent-Scan** with config analysis, code scanning, and optional LLM assessment
+- **Detection Core v2** with project-level multi-label dataflow, evidence paths, capability-chain correlation, and fail-closed incomplete states
+- **Artifact-aware Skill inspection** for archives, nested archives, OOXML documents, wheels/JARs, and `.pyc`, backed by a bounded evidence ledger
+- **Built-in MCP deep and live engines** for source audit, protocol inventory, trusted snapshots, and rug-pull drift detection
+- **Structured supply-chain analysis** for manifests, lockfiles, install hooks, external instruction graphs, SBOMs, and SLSA provenance
+- **Container/runtime coverage** for Dockerfile, Compose, Kubernetes, and explicitly authorized behavior analysis in a pinned read-only image
+- **Built-in ClawLock ASI 14 compatibility profile** with adapter-scoped config analysis, code scanning, and optional LLM assessment
 - **Interactive hardening** with 18 measures, platform-aware filtering, and explicit UX-impact disclosure
 - **JSON, text, and HTML reports** for the full `scan` workflow
 - **Global CLI language adaptation**:
@@ -42,7 +46,12 @@ clawlock harden --from-scan --auto-fix   # Fix only issues found in last scan
 clawlock harden --auto-fix --verify      # Auto-fix then verify the result
 clawlock harden --rollback               # Undo the last auto-fix
 clawlock mcp-scan ./mcp-server/src       # MCP source-code deep scan
-clawlock agent-scan --code ./agent/src   # Standalone OWASP ASI agent scan
+clawlock mcp-live ./.mcp.json --server fs --execute --snapshot ./mcp.snapshot.json
+clawlock supply-chain ./project          # Manifests, locks, instructions, SBOM, provenance
+clawlock runtime-scan ./deploy           # Dockerfile, Compose, and Kubernetes audit
+clawlock dynamic-scan ./skill --image analyzer@sha256:<digest> \
+  --entrypoint-json '["--","python","/workspace/main.py"]' --execute
+clawlock agent-scan --code ./agent/src   # Standalone ClawLock ASI compatibility scan
 clawlock scan --format html -o report.html
 ```
 
@@ -83,7 +92,19 @@ This applies to:
 - `--help`
 - runtime progress and summaries
 - hardening wizard output
-- scan / skill / precheck / soul / redteam / mcp-scan / agent-scan text output
+- scan / skill / precheck / soul / redteam / MCP / supply-chain / runtime / dynamic / agent-scan text output
+
+## Detection Core v2
+
+Detection Core v2 correlates evidence instead of treating every suspicious token as an isolated hit:
+
+- **Project-level multi-label dataflow** tracks untrusted input, secrets, file paths, network data, and downloaded content through aliases, assignments, arguments, returns, wrappers, and cross-file calls. Findings include source-to-sink evidence paths and confidence.
+- **Artifact recovery with an evidence ledger** safely inspects ZIP/TAR/wheel/JAR/OOXML content, nested containers, and recoverable `.pyc` instructions under entry, byte, depth, ratio, and time budgets. Path traversal, links, encryption, duplicate names, magic/extension mismatch, and source/bytecode mismatch remain visible in the ledger.
+- **Capability-chain correlation** joins events such as sensitive read → external write, download → execute, memory write → autorun, and untrusted path → write/execute. This raises confidence for meaningful attack chains while retaining the underlying evidence.
+- **Structured supply-chain checks** parse manifests and lockfiles, npm lifecycle hooks, Python build backends, mutable dependencies, SBOMs, recursive instruction references, pin/hash drift, and in-toto/SLSA statements. Remote instructions are recorded but not fetched by default. A DSSE signature is reported as present but is never called trusted without an independent verification policy.
+- **Live and runtime evidence** can inventory an explicitly selected MCP server, compare a trusted snapshot for tool/prompt/resource drift, audit deployment definitions, or run bounded behavior analysis in a pinned container.
+
+Every bounded traversal reports whether it completed. A budget limit, parser failure, unavailable explicitly requested tool, or refused active probe is **INCOMPLETE**, not a clean pass.
 
 ## Report Formats And Exit Modes
 
@@ -100,7 +121,9 @@ ClawLock uses three report formats for different workflows:
 | Mode | Behavior | Best for |
 |------|----------|----------|
 | `monitor` (default) | Report only; does not fail the run on findings | Manual review and exploratory checks |
-| `enforce` | Returns exit code `1` on critical/high findings | CI gates and automated enforcement (pass `--mode enforce`) |
+| `enforce` | Returns `1` on critical/high findings and `2` when a requested check is incomplete | CI gates and automated enforcement (pass `--mode enforce`) |
+
+Security focus commands use the same machine-friendly exit contract: `0` means the requested analysis completed without critical/high findings, `1` means critical/high findings were reported, and `2` means the requested analysis was **INCOMPLETE**. Review JSON `status`, `complete`, and finding metadata instead of treating exit `2` as success.
 
 Examples:
 
@@ -119,7 +142,7 @@ clawlock scan --format html -o report.html
 | 1 | Config audit | Adapter-aware config checks plus risky environment-variable checks |
 | 2 | Process exposure | Running processes and exposed listeners |
 | 3 | Credential audit | Permission review for credential files and directories |
-| 4 | Skill supply chain | Local pattern detection for dangerous skills and setup logic |
+| 4 | Skill supply chain | Pattern, artifact-ledger, dataflow, capability-chain, package, and instruction-graph analysis |
 | 5 | Prompt and memory | SOUL / prompt drift plus memory-file checks |
 | 6 | MCP exposure | MCP config and poisoning-surface checks |
 | 7 | CVE matching | Tencent cloud CVE intelligence lookup, enabled by default unless `--no-cve` |
@@ -144,6 +167,7 @@ No Node.js, no external scanner binary, and no LLM API key are required for:
 - hardening
 - history and watch mode
 - MCP deep scan
+- artifact, capability-chain, structured supply-chain, and runtime-definition analysis
 - `scan` includes the Agent-Scan config layer; use `agent-scan --code ...` for code-layer review
 
 ### 2. Online intelligence without API keys
@@ -169,13 +193,20 @@ export ANTHROPIC_API_KEY=sk-ant-...
 clawlock agent-scan --code ./src --llm
 ```
 
+When `--llm` is enabled, selected source/config snippets are redacted and truncated before being sent. A missing key, failed request, or unparseable response is reported as an incomplete requested check rather than a clean result. Prefer environment variables over `--token` so secrets do not enter shell history.
+
 ### 4. Optional external tools
 
 ClawLock can optionally integrate with external tools, but only in the paths where code actually uses them:
 
 | Tool | Current integration in ClawLock | When it is used |
 |------|---------------------------------|-----------------|
-| [promptfoo](https://github.com/promptfoo/promptfoo) | `clawlock redteam` / optional scan red-team stage | When you run red-team tests against a live endpoint; ClawLock can use `promptfoo` directly or via `npx` |
+| [promptfoo](https://github.com/promptfoo/promptfoo) | `clawlock redteam` / optional scan red-team stage | Requires an explicitly installed, preferably pinned `promptfoo` binary. ClawLock generates tests and evaluates them in separate steps with result sharing disabled; it never downloads `promptfoo@latest` through `npx`. |
+| [OSV-Scanner](https://github.com/google/osv-scanner) | `clawlock supply-chain PATH --osv` | Runs only an already installed binary after explicit opt-in; an unavailable requested adapter is INCOMPLETE. |
+| [Gitleaks](https://github.com/gitleaks/gitleaks) | `clawlock supply-chain PATH --gitleaks` | Runs only an already installed binary after explicit opt-in; reported secret material is redacted. |
+| Docker or Podman | `clawlock dynamic-scan` | Requires `--execute`, a digest-pinned analyzer image, a JSON argv entrypoint, and a non-host network policy. There is no host-execution fallback. |
+
+ClawLock never auto-downloads any of these tools. Live MCP stdio launch, remote MCP probing, trusted snapshot replacement, red-team traffic, and container execution require their corresponding explicit authorization flags. Static analysis remains local and passive.
 
 ## Command Overview
 
@@ -189,7 +220,11 @@ ClawLock can optionally integrate with external tools, but only in the paths whe
 | `harden` | Run the interactive hardening wizard |
 | `redteam` | Run promptfoo red-team tests |
 | `mcp-scan` | Deep-scan MCP server source code |
-| `agent-scan` | Run the OWASP ASI agent scan |
+| `mcp-live` | Collect an authorized MCP inventory and detect trusted-snapshot drift |
+| `supply-chain` | Audit dependencies, install hooks, instruction graphs, SBOMs, and SLSA provenance |
+| `dynamic-scan` | Run bounded behavior analysis in a pinned read-only Docker/Podman container |
+| `runtime-scan` | Audit Dockerfile, Compose, and Kubernetes security posture without deployment |
+| `agent-scan` | Run the ClawLock ASI 14 compatibility profile |
 | `history` | Show recent scan history |
 | `watch` | Watch key checks for changes |
 | `version` | Show version info |

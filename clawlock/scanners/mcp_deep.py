@@ -474,21 +474,18 @@ _SANITIZERS = {
     "shlex.quote", "shlex.split", "shlex.join",
     "pipes.quote", "subprocess.list2cmdline",
     # Regex / HTML / URL escaping
-    "re.escape", "html.escape", "html.unescape",
+    "re.escape", "html.escape",
     "urllib.parse.quote", "urllib.parse.quote_plus", "urllib.parse.urlencode",
-    # Path normalization (callers still need a containment check, but the
-    # normalized result alone is not the threat).
-    "os.path.realpath", "os.path.abspath", "os.path.normpath",
     # Type coercion — discards anything that isn't the requested type.
     "int", "float", "bool",
     "uuid.UUID", "ipaddress.ip_address", "ipaddress.IPv4Address",
 }
 
-# Method-name suffixes that, when invoked, untaint the result. Covers patterns
-# like ``Path(x).resolve()`` and ``re.compile(p).escape(x)`` without needing
-# the full dotted name.
+# Method-name suffixes that, when invoked, untaint the result.  Path
+# normalization is deliberately absent: resolve/realpath/abspath do not prove
+# containment beneath an allowed root and must not hide a traversal flow.
 _SANITIZER_METHOD_SUFFIXES = (
-    ".resolve", ".escape", ".quote", ".quote_plus",
+    ".escape", ".quote", ".quote_plus",
 )
 
 _DANGEROUS_SINKS = {
@@ -740,8 +737,24 @@ def _ast_analyze_python(source: str, filepath: str) -> List[Finding]:
     findings: List[Finding] = []
     try:
         tree = ast.parse(source, filename=filepath)
-    except SyntaxError:
-        return findings
+    except SyntaxError as exc:
+        return [
+            Finding(
+                scanner="internal",
+                level=WARN,
+                title=t("Python AST 分析不完整", "Python AST analysis incomplete"),
+                detail=t(
+                    f"{filepath} 无法解析：{exc.msg}（第 {exc.lineno or '?'} 行）。",
+                    f"{filepath} could not be parsed: {exc.msg} (line {exc.lineno or '?'}).",
+                ),
+                location=f"{filepath}:{exc.lineno or '?'}",
+                metadata={
+                    "scan_status": "error",
+                    "component": "mcp_python_ast",
+                    "file": filepath,
+                },
+            )
+        ]
 
     all_funcs: List[ast.AST] = [
         n for n in ast.walk(tree)
@@ -1081,25 +1094,34 @@ _JS_MCP_EXTRA_PATTERNS = [
 _CODE_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}
 _SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build"}
 _MAX_FILE_SIZE = 512 * 1024  # 512KB per file
+_MAX_CODE_FILES = 2_000
+_MAX_TOTAL_CODE_BYTES = 32 * 1024 * 1024
 _REACT2SHELL_AFFECTED = {"react": ("19.0.0", "19.2.99"), "next": ("15.0.0", "15.0.4")}
 
-# Per-file auth-middleware indicators. If any of these match, we suppress
-# AUTHZ patterns flagged with ``suppress_if_auth_present=True`` for that file,
-# because the file demonstrably has *some* form of authentication wiring and
-# the per-route negative lookahead approach is too brittle to assert otherwise.
-_AUTH_INDICATORS = re.compile(
-    r"(?i)("
-    r"app\.use\s*\([^)]*(?:auth|passport|verify|jwt|session|require[A-Z]?[a-z]*(?:Auth|User|Login))"
-    r"|passport\.authenticate\s*\("
-    r"|verify(?:Token|Auth|JWT|Signature)\s*\("
-    r"|require(?:Auth|User|Login)\s*\("
-    r"|express(?:-|_)jwt|jwt-?middleware"
-    r"|fastapi[.]security|Depends\s*\([^)]*(?:auth|verify|current_user|get_user)"
-    r"|@(?:login_required|permission_required|auth_required|requires_auth|authenticated|protected)\b"
-    r"|HTTPBearer\s*\(|OAuth2PasswordBearer\s*\("
-    r"|@app\.middleware\s*\([\"']http[\"']\s*\)"
-    r")"
+# Only an unscoped middleware registration that occurs *before the route* can
+# dominate it.  A file-level "some auth exists" boolean lets one protected
+# route hide a public route elsewhere in the same module.
+_GLOBAL_AUTH_MIDDLEWARE_RE = re.compile(
+    r"(?i)\b(?P<receiver>app|router)\.use\s*\(\s*"
+    r"(?!(?:[\"']))"
+    r"(?:[A-Za-z_$][\w$]*\.)*"
+    r"(?:auth\w*|authenticate\w*|require\w*(?:Auth|User|Login)|"
+    r"verify\w*(?:Token|Auth|JWT|Signature)|passport\.authenticate|"
+    r"express(?:-|_)?jwt|jwt\w*middleware)\b"
 )
+
+
+def _global_auth_dominates_route(content: str, route_match: re.Match[str]) -> bool:
+    receiver_match = re.match(r"(?i)\s*(app|router)\.", route_match.group(0))
+    if not receiver_match:
+        return False
+    receiver = receiver_match.group(1).lower()
+    return any(
+        match.group("receiver").lower() == receiver
+        for match in _GLOBAL_AUTH_MIDDLEWARE_RE.finditer(
+            content, 0, route_match.start()
+        )
+    )
 
 
 def scan_mcp_source(code_path: Path) -> List[Finding]:
@@ -1118,46 +1140,217 @@ def scan_mcp_source(code_path: Path) -> List[Finding]:
 
     findings: List[Finding] = []
     files_scanned = 0
+    total_code_bytes = 0
+    pruned_dirs: set[str] = set()
+
+    def coverage_finding(title: str, detail: str, location: str, component: str) -> Finding:
+        return Finding(
+            scanner="internal",
+            level=WARN,
+            title=title,
+            detail=detail,
+            location=location,
+            metadata={"scan_status": "error", "component": component},
+        )
 
     # Collect all code files
     if code_path.is_file():
-        code_files = [code_path] if code_path.suffix in _CODE_EXTENSIONS else []
+        code_files = []
+        if code_path.is_symlink():
+            findings.append(
+                coverage_finding(
+                    t("MCP 源码链接未跟随", "MCP source link was not followed"),
+                    t("显式源码路径是符号链接。", "The explicit source path is a symbolic link."),
+                    str(code_path),
+                    "mcp_source_inventory",
+                )
+            )
+        elif code_path.suffix not in _CODE_EXTENSIONS:
+            findings.append(
+                coverage_finding(
+                    t("MCP 源码类型不受支持", "Unsupported MCP source type"),
+                    t(
+                        f"不支持扩展名 {code_path.suffix or '(none)'}。",
+                        f"Extension {code_path.suffix or '(none)'} is not supported.",
+                    ),
+                    str(code_path),
+                    "mcp_source_inventory",
+                )
+            )
+        else:
+            try:
+                size = code_path.stat().st_size
+            except OSError as exc:
+                findings.append(
+                    coverage_finding(
+                        t("MCP 源码无法读取元数据", "MCP source metadata unavailable"),
+                        str(exc),
+                        str(code_path),
+                        "mcp_source_inventory",
+                    )
+                )
+            else:
+                if size > _MAX_FILE_SIZE:
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码超过扫描上限", "MCP source exceeds scan limit"),
+                            t(
+                                f"文件 {size} 字节，单文件上限 {_MAX_FILE_SIZE} 字节。",
+                                f"File is {size} bytes; per-file limit is {_MAX_FILE_SIZE} bytes.",
+                            ),
+                            str(code_path),
+                            "mcp_source_budget",
+                        )
+                    )
+                else:
+                    code_files.append(code_path)
     else:
         code_files = []
+        limit_reached = False
         for root, dirs, files in os.walk(code_path):
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-            for f in files:
+            retained_dirs = []
+            for directory in dirs:
+                candidate_dir = Path(root) / directory
+                if directory in _SKIP_DIRS:
+                    pruned_dirs.add(directory)
+                    continue
+                if candidate_dir.is_symlink():
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码目录链接未跟随", "MCP source directory link was not followed"),
+                            t("为防止越界读取，目录链接不会被扫描。", "Directory links are not scanned to prevent boundary escape."),
+                            str(candidate_dir),
+                            "mcp_source_inventory",
+                        )
+                    )
+                    continue
+                retained_dirs.append(directory)
+            dirs[:] = retained_dirs
+            for f in sorted(files):
                 fp = Path(root) / f
-                if (
-                    fp.suffix in _CODE_EXTENSIONS
-                    and fp.stat().st_size <= _MAX_FILE_SIZE
-                ):
-                    code_files.append(fp)
+                if fp.suffix not in _CODE_EXTENSIONS:
+                    continue
+                if fp.is_symlink():
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码文件链接未跟随", "MCP source file link was not followed"),
+                            t("为防止越界读取，文件链接不会被扫描。", "File links are not scanned to prevent boundary escape."),
+                            str(fp),
+                            "mcp_source_inventory",
+                        )
+                    )
+                    continue
+                try:
+                    size = fp.stat().st_size
+                except OSError as exc:
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码无法读取元数据", "MCP source metadata unavailable"),
+                            str(exc),
+                            str(fp),
+                            "mcp_source_inventory",
+                        )
+                    )
+                    continue
+                if size > _MAX_FILE_SIZE:
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码超过扫描上限", "MCP source exceeds scan limit"),
+                            t(
+                                f"文件 {size} 字节，未执行完整规则集。",
+                                f"File is {size} bytes and did not receive the complete rule set.",
+                            ),
+                            str(fp),
+                            "mcp_source_budget",
+                        )
+                    )
+                    continue
+                if len(code_files) >= _MAX_CODE_FILES:
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码文件数超过上限", "MCP source file count exceeds limit"),
+                            t(
+                                f"最多分析 {_MAX_CODE_FILES} 个源码文件。",
+                                f"At most {_MAX_CODE_FILES} source files are analyzed.",
+                            ),
+                            str(code_path),
+                            "mcp_source_budget",
+                        )
+                    )
+                    limit_reached = True
+                    break
+                if total_code_bytes + size > _MAX_TOTAL_CODE_BYTES:
+                    findings.append(
+                        coverage_finding(
+                            t("MCP 源码总字节预算耗尽", "MCP source byte budget exhausted"),
+                            t(
+                                f"总预算 {_MAX_TOTAL_CODE_BYTES // (1024 * 1024)} MiB。",
+                                f"Total source budget is {_MAX_TOTAL_CODE_BYTES // (1024 * 1024)} MiB.",
+                            ),
+                            str(fp),
+                            "mcp_source_budget",
+                        )
+                    )
+                    limit_reached = True
+                    break
+                code_files.append(fp)
+                total_code_bytes += size
+            if limit_reached:
+                break
+
+    if pruned_dirs:
+        findings.append(
+            Finding(
+                scanner="mcp_deep",
+                level=INFO,
+                title=t("MCP 源码扫描排除了依赖/构建目录", "MCP source scan pruned dependency/build directories"),
+                detail=", ".join(sorted(pruned_dirs)),
+                location=str(code_path),
+                metadata={
+                    "component": "mcp_source_inventory",
+                    "scan_status": "skipped",
+                    "pruned_dirs": sorted(pruned_dirs),
+                },
+            )
+        )
 
     if not code_files:
-        return [
-            Finding(
-                "mcp_deep",
-                INFO,
-                t("未找到可分析的代码文件", "No analyzable code files found"),
-                t(f"路径 {code_path} 下未发现 {', '.join(_CODE_EXTENSIONS)} 文件。", f"No {', '.join(_CODE_EXTENSIONS)} files found under {code_path}."),
+        if not findings:
+            findings.append(
+                coverage_finding(
+                    t("未找到可分析的 MCP 代码", "No analyzable MCP code found"),
+                    t(
+                        f"路径下未发现 {', '.join(sorted(_CODE_EXTENSIONS))}。",
+                        f"No {', '.join(sorted(_CODE_EXTENSIONS))} files were found.",
+                    ),
+                    str(code_path),
+                    "mcp_source_inventory",
+                )
             )
-        ]
+        return findings
 
     for fp in code_files:
         try:
             content = fp.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        except (OSError, UnicodeError) as exc:
+            findings.append(
+                coverage_finding(
+                    t("MCP 源码无法读取", "MCP source could not be read"),
+                    str(exc),
+                    str(fp),
+                    "mcp_source_read",
+                )
+            )
             continue
         files_scanned += 1
         rel = str(fp.relative_to(code_path)) if code_path.is_dir() else fp.name
-        has_auth_middleware = bool(_AUTH_INDICATORS.search(content))
-
         # 1) Universal regex patterns
         for pat in _MCP_PATTERNS:
-            if pat.suppress_if_auth_present and has_auth_middleware:
-                continue
             for match in pat.pattern.finditer(content):
+                if pat.suppress_if_auth_present and _global_auth_dominates_route(
+                    content, match
+                ):
+                    continue
                 lineno = content[: match.start()].count("\n") + 1
                 snippet = match.group(0)[:80].strip()
                 findings.append(
@@ -1196,8 +1389,65 @@ def scan_mcp_source(code_path: Path) -> List[Finding]:
                         )
                     )
 
-    # 4) Check package manifests for risky deps / known frontend CVEs
+    # 4) Shared project-level fixed-point data-flow analysis.  The older
+    # file-local rules remain additive for compatibility and language breadth.
+    try:
+        from .dataflow import analyze_project, analyze_python_file
+        from .dataflow_reporting import findings_from_dataflow
+
+        if code_path.is_dir():
+            flow_result = analyze_project(code_path)
+            findings.extend(
+                findings_from_dataflow(
+                    flow_result, scanner="mcp_dataflow", root=code_path
+                )
+            )
+        elif code_path.suffix.lower() == ".py":
+            flow_result = analyze_python_file(code_path)
+            findings.extend(
+                findings_from_dataflow(
+                    flow_result, scanner="mcp_dataflow", root=code_path.parent
+                )
+            )
+    except Exception as exc:
+        findings.append(
+            coverage_finding(
+                t("MCP 项目级数据流分析失败", "MCP project data-flow analysis failed"),
+                f"{type(exc).__name__}: {exc}",
+                str(code_path),
+                "dataflow_v2",
+            )
+        )
+
+    # 5) Check package manifests for risky deps / known frontend CVEs
     findings.extend(scan_package_manifest_risks(code_path))
+    try:
+        from . import _skill_supply_chain_findings
+
+        findings.extend(_skill_supply_chain_findings(code_path))
+    except Exception as exc:
+        findings.append(
+            coverage_finding(
+                t("MCP 结构化供应链分析失败", "MCP structured supply-chain analysis failed"),
+                f"{type(exc).__name__}: {exc}",
+                str(code_path),
+                "supply_chain",
+            )
+        )
+
+    try:
+        from .capability_reporting import correlate_findings
+
+        findings.extend(correlate_findings(findings, subject=str(code_path)))
+    except Exception as exc:
+        findings.append(
+            coverage_finding(
+                t("MCP 聚合能力链分析失败", "MCP aggregate capability analysis failed"),
+                f"{type(exc).__name__}: {exc}",
+                str(code_path),
+                "capability_graph",
+            )
+        )
 
     # Deduplicate by (title, location)
     seen = set()

@@ -2,8 +2,9 @@
 
 * Disables ClawLock's network-backed package-existence probe so that
   ``scan_package_manifest_risks`` does not reach npm / PyPI during tests.
-* Redirects the SQLite scan-history database and legacy JSON path to a
-  per-session tmp directory so tests never write to ``~/.clawlock``.
+* Redirects the SQLite scan-history database, legacy JSON path, and drift
+  baseline store to a per-session tmp directory so tests never write to
+  ``~/.clawlock``.
 
 Individual tests that need to exercise the probe can ``monkeypatch.delenv``.
 """
@@ -26,4 +27,10 @@ def _isolate_scan_history(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(u, "DB_PATH", data_dir / "clawlock.db")
     monkeypatch.setattr(u, "HISTORY_FILE", data_dir / "scan_history.json")
     monkeypatch.setattr(u, "_LEGACY_IMPORTED_FLAG", data_dir / ".history-imported")
+
+    import clawlock.scanners as scanners
+
+    monkeypatch.setattr(scanners, "HASH_STORE", data_dir / "drift_hashes.json")
+    monkeypatch.setattr(scanners, "_HASH_CACHE", None)
+    monkeypatch.setattr(scanners, "_HASH_CACHE_PATH", None)
     yield

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from rich.console import Console
 from rich.panel import Panel
@@ -19,68 +24,633 @@ console = Console()
 # ─── Backup / rollback infrastructure ────────────────────────────────────────
 
 HARDENING_LOG = Path.home() / ".clawlock" / "hardening_log.json"
+_DEFAULT_HARDENING_LOG = HARDENING_LOG
+_LOG_VERSION = 2
+_ACTION_ID_RE = re.compile(
+    r"^[a-z0-9]+-\d{8}T\d{6}_\d{6}-[0-9a-f]{12}$"
+)
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_CREDENTIAL_SUFFIXES = {".json", ".key", ".pem", ".token", ".env", ".rc"}
+
+
+class HardeningLogError(RuntimeError):
+    """The rollback journal is malformed or points outside trusted storage."""
+
+
+def _hardening_log_path() -> Path:
+    """Resolve the default lazily while honoring an explicitly overridden path."""
+    if HARDENING_LOG != _DEFAULT_HARDENING_LOG:
+        return HARDENING_LOG
+    return Path.home() / ".clawlock" / "hardening_log.json"
+
+
+def _backup_root() -> Path:
+    return Path.home() / ".clawlock" / "backups"
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_elevated() -> bool:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            # The trust boundary cannot be established, so callers must fail
+            # closed instead of consuming a user-writable rollback journal.
+            return True
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def _trusted_for_elevated_rollback(log_path: Path) -> bool:
+    if not _is_elevated():
+        return True
+    if IS_WINDOWS:
+        # A journal in the interactive user's profile remains writable by the
+        # same account before elevation.  Until a high-integrity storage backend
+        # exists, elevated rollback must not trust it.
+        return False
+    try:
+        expected_uid = os.geteuid()
+        for candidate in (log_path, log_path.parent, _backup_root()):
+            if not candidate.exists() or candidate.is_symlink():
+                return False
+            info = candidate.stat()
+            if info.st_uid != expected_uid or info.st_mode & 0o022:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _file_digest(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _windows_replace_file(source: Path, destination: Path, flags: int = 0) -> None:
+    """Replace an existing Windows file while preserving its DACL/metadata."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    replace_file = kernel32.ReplaceFileW
+    replace_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    replace_file.restype = wintypes.BOOL
+    if not replace_file(
+        str(_absolute_path(destination)),
+        str(_absolute_path(source)),
+        None,
+        flags,
+        None,
+        None,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _replace_path(source: Path, destination: Path) -> None:
+    """Atomically replace a path, preserving metadata on existing Windows files."""
+    if IS_WINDOWS and destination.exists():
+        _windows_replace_file(source, destination, flags=0)
+    else:
+        os.replace(source, destination)
+
+
+def _atomic_write_json(
+    path: Path,
+    value: Any,
+    *,
+    expected_digest: Optional[str] = None,
+) -> bool:
+    """Atomically replace *path* with validated JSON.
+
+    The temporary file lives beside the destination, so ``os.replace`` remains
+    atomic.  ``expected_digest`` prevents overwriting a config that changed
+    after the transaction prepared its backup.
+    """
+    temp_path: Optional[Path] = None
+    try:
+        if path.is_symlink():
+            return False
+        if expected_digest is not None:
+            if not path.is_file() or _file_digest(path) != expected_digest:
+                return False
+
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+        # Validate the exact bytes before they can replace the destination.
+        if json.loads(encoded) != value:
+            return False
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if path.exists():
+            shutil.copymode(path, temp_path)
+        elif os.name != "nt":
+            os.chmod(temp_path, 0o600)
+
+        # Validate the on-disk temporary file and re-check the source immediately
+        # before replacement to narrow the concurrent-update window.
+        if json.loads(temp_path.read_text(encoding="utf-8")) != value:
+            return False
+        if expected_digest is not None and _file_digest(path) != expected_digest:
+            return False
+
+        _replace_path(temp_path, path)
+        temp_path = None
+        return json.loads(path.read_text(encoding="utf-8")) == value
+    except Exception:
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _canonical_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _credential_directories() -> List[Path]:
+    home = Path.home()
+    return [
+        home / ".openclaw",
+        home / ".zeroclaw",
+        home / ".claude",
+        home / ".config" / "openclaw",
+        home / ".config" / "zeroclaw",
+        home / ".config" / "claude",
+    ]
+
+
+def _allowed_hardening_target(path: Path) -> bool:
+    """Restrict journal-controlled writes to documented ClawLock targets."""
+    try:
+        target = _absolute_path(path)
+        home = _absolute_path(Path.home())
+        resolved_home = home.resolve(strict=True)
+        resolved_target = target.resolve(strict=False)
+        if not _is_within(resolved_target, resolved_home):
+            return False
+        if target.exists() and target.is_symlink():
+            return False
+
+        exact = {
+            _absolute_path(candidate)
+            for candidates in _known_config_paths().values()
+            for candidate in candidates
+        }
+        directories = {_absolute_path(item) for item in _credential_directories()}
+        exact.update(directories)
+        exact.update(
+            {
+                _absolute_path(home / ".npmrc"),
+                _absolute_path(home / ".pypirc"),
+                _absolute_path(home / ".netrc"),
+            }
+        )
+        if target in exact:
+            return True
+        return target.parent in directories and target.suffix in _CREDENTIAL_SUFFIXES
+    except Exception:
+        return False
+
+
+def _path_in_action_dir(path: Path, action_id: str) -> bool:
+    try:
+        candidate = _absolute_path(path)
+        root = _absolute_path(_backup_root())
+        action_dir = _absolute_path(root / action_id)
+        if not _is_within(candidate, action_dir):
+            return False
+        for storage_component in (root.parent, root, action_dir):
+            if storage_component.exists() and storage_component.is_symlink():
+                return False
+        if candidate.exists() and candidate.is_symlink():
+            return False
+        resolved_home = _absolute_path(Path.home()).resolve(strict=True)
+        resolved_root = root.resolve(strict=False)
+        resolved_action = action_dir.resolve(strict=False)
+        resolved_candidate = candidate.resolve(strict=False)
+        return (
+            _is_within(resolved_root, resolved_home)
+            and _is_within(resolved_action, resolved_root)
+            and _is_within(resolved_candidate, resolved_action)
+        )
+    except Exception:
+        return False
+
+
+def _permission_snapshot_digest(snapshot: Dict[str, object]) -> Optional[str]:
+    try:
+        if snapshot.get("platform") == "windows":
+            return _file_digest(Path(str(snapshot["acl_file"])))
+        if snapshot.get("platform") == "unix":
+            return _canonical_digest(snapshot)
+    except Exception:
+        pass
+    return None
+
+
+def _validate_action_record(entry: object) -> bool:
+    if not isinstance(entry, dict) or set(entry) != {
+        "version",
+        "id",
+        "time",
+        "measure",
+        "status",
+        "files",
+        "permissions",
+    }:
+        return False
+    action_id = entry.get("id")
+    if entry.get("version") != _LOG_VERSION or not isinstance(action_id, str):
+        return False
+    if not _ACTION_ID_RE.fullmatch(action_id):
+        return False
+    if not isinstance(entry.get("time"), str):
+        return False
+    try:
+        datetime.fromisoformat(entry["time"])
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(entry.get("measure"), str) or not re.fullmatch(
+        r"H\d{3}", entry["measure"]
+    ):
+        return False
+    if entry.get("status") not in {"pending", "committed"}:
+        return False
+
+    files = entry.get("files")
+    permissions = entry.get("permissions")
+    if not isinstance(files, dict) or not isinstance(permissions, dict):
+        return False
+    if len(files) > 100 or len(permissions) > 100:
+        return False
+
+    for original, metadata in files.items():
+        if not isinstance(original, str) or not _allowed_hardening_target(Path(original)):
+            return False
+        if not isinstance(metadata, dict) or set(metadata) != {"backup", "digest"}:
+            return False
+        backup = metadata.get("backup")
+        digest = metadata.get("digest")
+        if not isinstance(backup, str) or not _path_in_action_dir(
+            Path(backup), action_id
+        ):
+            return False
+        if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
+            return False
+
+    for original, metadata in permissions.items():
+        if not isinstance(original, str) or not _allowed_hardening_target(Path(original)):
+            return False
+        if not isinstance(metadata, dict) or set(metadata) != {"snapshot", "digest"}:
+            return False
+        snapshot = metadata.get("snapshot")
+        digest = metadata.get("digest")
+        if not isinstance(snapshot, dict) or not isinstance(digest, str):
+            return False
+        if not _DIGEST_RE.fullmatch(digest):
+            return False
+        platform_name = snapshot.get("platform")
+        if platform_name == "windows":
+            if set(snapshot) != {"platform", "acl_file", "restore_root"}:
+                return False
+            acl_file = snapshot.get("acl_file")
+            restore_root = snapshot.get("restore_root")
+            if not isinstance(acl_file, str) or not _path_in_action_dir(
+                Path(acl_file), action_id
+            ):
+                return False
+            if not isinstance(restore_root, str):
+                return False
+            if _absolute_path(Path(restore_root)) != _absolute_path(
+                Path(original).parent
+            ):
+                return False
+        elif platform_name == "unix":
+            if set(snapshot) != {"platform", "mode"}:
+                return False
+            if not isinstance(snapshot.get("mode"), int) or not 0 <= snapshot["mode"] <= 0o7777:
+                return False
+        else:
+            return False
+    return True
+
+
+def _validate_log(records: object) -> List[dict]:
+    if not isinstance(records, list) or len(records) > 200:
+        raise HardeningLogError("invalid rollback journal container")
+    if not all(_validate_action_record(entry) for entry in records):
+        raise HardeningLogError("invalid rollback journal record")
+    return records
 
 
 def _load_hardening_log() -> list:
+    log_path = _hardening_log_path()
+    if not log_path.exists():
+        return []
     try:
-        if HARDENING_LOG.exists():
-            return json.loads(HARDENING_LOG.read_text())
-    except Exception:
-        pass
-    return []
+        if log_path.is_symlink() or log_path.stat().st_size > 2 * 1024 * 1024:
+            raise HardeningLogError("unsafe rollback journal")
+        return _validate_log(json.loads(log_path.read_text(encoding="utf-8")))
+    except HardeningLogError:
+        raise
+    except Exception as exc:
+        raise HardeningLogError("unreadable rollback journal") from exc
 
 
-def _save_hardening_log(records: list):
+def _save_hardening_log(records: list) -> bool:
+    log_path = _hardening_log_path()
     try:
-        HARDENING_LOG.parent.mkdir(parents=True, exist_ok=True)
-        HARDENING_LOG.write_text(json.dumps(records[-200:], ensure_ascii=False, indent=2))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(log_path.parent, 0o700)
+        validated = _validate_log(records[-200:])
+        return _atomic_write_json(log_path, validated)
     except Exception:
-        pass
+        return False
 
 
-def _backup_file(path: Path) -> Optional[Path]:
-    """Create a timestamped backup of a file before modification. Returns backup path."""
-    if not path.exists():
-        return None
-    backup_dir = Path.home() / ".clawlock" / "backups"
+def _new_action_id(measure_id: str) -> str:
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+    return f"{measure_id.lower()}-{stamp}-{uuid.uuid4().hex[:12]}"
+
+
+def _action_backup_dir(action_id: str) -> Path:
+    if not _ACTION_ID_RE.fullmatch(action_id):
+        raise ValueError("invalid hardening action id")
+    backup_dir = _backup_root() / action_id
     backup_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"{path.name}.{ts}.bak"
+    if os.name != "nt":
+        os.chmod(backup_dir, 0o700)
+    return backup_dir
+
+
+def _backup_file(path: Path, action_id: Optional[str] = None) -> Optional[Path]:
+    """Create and verify a unique backup before modification."""
+    if not path.is_file() or path.is_symlink():
+        return None
     try:
+        action_id = action_id or _new_action_id("manual")
+        backup_dir = _action_backup_dir(action_id)
+        path_key = hashlib.sha256(
+            str(path.absolute()).encode("utf-8", errors="surrogatepass")
+        ).hexdigest()[:16]
+        backup_path = backup_dir / f"{path_key}-{path.name}.bak"
+        if backup_path.exists():
+            backup_path = backup_dir / (
+                f"{path_key}-{uuid.uuid4().hex[:12]}-{path.name}.bak"
+            )
         shutil.copy2(path, backup_path)
+        source_digest = _file_digest(path)
+        if source_digest is None or _file_digest(backup_path) != source_digest:
+            backup_path.unlink(missing_ok=True)
+            return None
         return backup_path
     except Exception:
         return None
 
 
-def _record_hardening_action(measure_id: str, files_changed: Dict[str, str]):
+def _record_hardening_action(
+    measure_id: str,
+    files_changed: Dict[str, object],
+    permissions_changed: Optional[Dict[str, Dict[str, object]]] = None,
+    *,
+    action_id: Optional[str] = None,
+    status: str = "committed",
+) -> bool:
     """Record an auto-fix action with backup paths for rollback."""
-    log = _load_hardening_log()
-    log.append({
-        "time": datetime.now().isoformat(),
-        "measure": measure_id,
-        "files": files_changed,  # {original_path: backup_path}
-    })
-    _save_hardening_log(log)
+    action_id = action_id or _new_action_id(measure_id)
+    try:
+        normalized_files: Dict[str, Dict[str, str]] = {}
+        for original, raw_metadata in files_changed.items():
+            if isinstance(raw_metadata, dict):
+                backup = str(raw_metadata["backup"])
+                digest = str(raw_metadata["digest"])
+            else:
+                backup = str(raw_metadata)
+                digest = _file_digest(Path(backup)) or ""
+            normalized_files[str(original)] = {"backup": backup, "digest": digest}
+
+        normalized_permissions: Dict[str, Dict[str, object]] = {}
+        for original, snapshot in (permissions_changed or {}).items():
+            if set(snapshot) == {"snapshot", "digest"}:
+                normalized_permissions[str(original)] = dict(snapshot)
+            else:
+                digest = _permission_snapshot_digest(snapshot)
+                normalized_permissions[str(original)] = {
+                    "snapshot": dict(snapshot),
+                    "digest": digest or "",
+                }
+
+        entry = {
+            "version": _LOG_VERSION,
+            "id": action_id,
+            "time": datetime.now().isoformat(),
+            "measure": measure_id,
+            "status": status,
+            "files": normalized_files,
+            "permissions": normalized_permissions,
+        }
+        if not _validate_action_record(entry):
+            return False
+        log = _load_hardening_log()
+        log.append(entry)
+        return _save_hardening_log(log)
+    except (HardeningLogError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _set_action_status(action_id: str, status: str) -> bool:
+    try:
+        log = _load_hardening_log()
+        for entry in reversed(log):
+            if entry.get("id") == action_id:
+                entry["status"] = status
+                return _save_hardening_log(log)
+    except HardeningLogError:
+        return False
+    return False
+
+
+def _get_action_record(action_id: str) -> Optional[dict]:
+    try:
+        for entry in reversed(_load_hardening_log()):
+            if entry.get("id") == action_id:
+                return entry
+    except HardeningLogError:
+        pass
+    return None
+
+
+def _remove_action(action_id: str) -> bool:
+    try:
+        log = _load_hardening_log()
+        filtered = [entry for entry in log if entry.get("id") != action_id]
+    except HardeningLogError:
+        return False
+    if len(filtered) == len(log):
+        return False
+    return _save_hardening_log(filtered)
+
+
+def _restore_file_from_backup(original: Path, backup: Path) -> bool:
+    temp_path: Optional[Path] = None
+    try:
+        if not backup.is_file() or backup.is_symlink() or original.is_symlink():
+            return False
+        expected = _file_digest(backup)
+        if expected is None:
+            return False
+        original.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{original.name}.", suffix=".rollback", dir=str(original.parent)
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        shutil.copy2(backup, temp_path)
+        if _file_digest(temp_path) != expected:
+            return False
+        _replace_path(temp_path, original)
+        temp_path = None
+        return _file_digest(original) == expected
+    except Exception:
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _restore_action(entry: dict) -> Tuple[List[str], List[str]]:
+    """Restore one grouped action; return (restored paths, failed paths)."""
+    from ..utils import restore_file_permission
+
+    restored: List[str] = []
+    failed: List[str] = []
+    if not _validate_action_record(entry):
+        return restored, ["<invalid rollback action>"]
+    files = entry.get("files", {})
+    for original, metadata in files.items():
+        backup = Path(metadata["backup"])
+        expected_digest = metadata["digest"]
+        if _file_digest(backup) != expected_digest:
+            failed.append(str(original))
+            continue
+        if _restore_file_from_backup(Path(original), backup):
+            restored.append(str(original))
+        else:
+            failed.append(str(original))
+
+    permissions = entry.get("permissions", {})
+    for original, metadata in permissions.items():
+        snapshot = metadata["snapshot"]
+        if _permission_snapshot_digest(snapshot) != metadata["digest"]:
+            failed.append(str(original))
+            continue
+        if restore_file_permission(Path(original), snapshot):
+            restored.append(str(original))
+        else:
+            failed.append(str(original))
+    return restored, failed
 
 
 def rollback_last(count: int = 1) -> int:
     """Rollback the last N hardening actions. Returns number of files restored."""
-    log = _load_hardening_log()
+    log_path = _hardening_log_path()
+    if log_path.exists() and not _trusted_for_elevated_rollback(log_path):
+        console.print(
+            f"  [red]{t('提权回滚拒绝使用不可信用户日志', 'Elevated rollback refused an untrusted user journal')}[/red]"
+        )
+        return 0
+    try:
+        log = _load_hardening_log()
+    except HardeningLogError:
+        console.print(
+            f"  [red]{t('回滚日志无效；已拒绝执行', 'Rollback journal is invalid; refusing to continue')}[/red]"
+        )
+        return 0
     restored = 0
     for _ in range(min(count, len(log))):
-        entry = log.pop()
-        for orig, backup in entry.get("files", {}).items():
-            orig_p, backup_p = Path(orig), Path(backup)
-            if backup_p.exists():
-                try:
-                    shutil.copy2(backup_p, orig_p)
-                    restored += 1
-                    console.print(f"  [green]{t('已还原', 'Restored')}: {orig}[/green]")
-                except Exception:
-                    console.print(f"  [red]{t('还原失败', 'Restore failed')}: {orig}[/red]")
-    _save_hardening_log(log)
+        entry = log[-1]
+        restored_paths, failed_paths = _restore_action(entry)
+        for original in restored_paths:
+            console.print(
+                f"  [green]{t('已还原', 'Restored')}: {original}[/green]"
+            )
+        for original in failed_paths:
+            console.print(
+                f"  [red]{t('还原失败', 'Restore failed')}: {original}[/red]"
+            )
+        if failed_paths:
+            # Keep the entire grouped entry so a later rollback can retry every
+            # member.  Successful members are safe to restore idempotently.
+            break
+
+        candidate_log = log[:-1]
+        if not _save_hardening_log(candidate_log):
+            # The on-disk log still contains the action because log writes are
+            # atomic.  Do not claim it was consumed; a retry is safe.
+            console.print(
+                f"  [red]{t('回滚日志更新失败；操作记录已保留', 'Rollback log update failed; action retained')}[/red]"
+            )
+            break
+        log = candidate_log
+        restored += len(set(restored_paths))
     return restored
+
+
 TextValue = Union[str, Callable[[], str]]
 
 
@@ -198,111 +768,311 @@ def _persistence_guidance() -> bool:
     )
 
 
-def _fix_cred_perms():
-    from ..utils import fix_file_permission, check_file_permission
+def _fix_cred_perms(
+    *,
+    permission_capturer: Optional[
+        Callable[[Path, Optional[Path]], Optional[Dict[str, object]]]
+    ] = None,
+    permission_fixer: Optional[Callable[[Path, bool], bool]] = None,
+):
+    from ..utils import (
+        _SYSTEM_FIX_FILE_PERMISSION,
+        capture_file_permission,
+        check_file_permission,
+        fix_file_permission,
+    )
 
-    fixed = 0
-    changed_files: Dict[str, str] = {}
-    for d in [
+    fixer = permission_fixer or fix_file_permission
+    capturer = permission_capturer
+    if capturer is None and fixer is _SYSTEM_FIX_FILE_PERMISSION:
+        capturer = capture_file_permission
+
+    targets: List[Path] = []
+    credential_dirs = [
         Path.home() / ".openclaw",
         Path.home() / ".zeroclaw",
         Path.home() / ".claude",
         Path.home() / ".config" / "openclaw",
         Path.home() / ".config" / "zeroclaw",
         Path.home() / ".config" / "claude",
-    ]:
-        if d.exists():
-            if fix_file_permission(d, private=True):
-                fixed += 1
-                _g(f"{t('已收紧', 'Tightened')}: {d}")
-            for f in d.iterdir():
-                if f.is_file() and f.suffix in (
-                    ".json",
-                    ".key",
-                    ".pem",
-                    ".token",
-                    ".env",
-                    ".rc",
-                ):
-                    world_r, group_r, _ = check_file_permission(f)
-                    if world_r or group_r:
-                        fix_file_permission(f, private=True)
-                        _g(f"{t('已收紧', 'Tightened')}: {f}")
+    ]
+    for directory in credential_dirs:
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            _g(
+                f"{t('拒绝跟随凭证目录符号链接', 'Refusing credential-directory symlink')}: {directory}"
+            )
+            return False
+        targets.append(directory)
+        for candidate in directory.iterdir():
+            if candidate.suffix not in (
+                ".json",
+                ".key",
+                ".pem",
+                ".token",
+                ".env",
+                ".rc",
+            ):
+                continue
+            if candidate.is_symlink():
+                _g(
+                    f"{t('拒绝跟随凭证文件符号链接', 'Refusing credential-file symlink')}: {candidate}"
+                )
+                return False
+            if not candidate.is_file():
+                continue
+            if capturer is None:
+                targets.append(candidate)
+            else:
+                world_r, group_r, _ = check_file_permission(candidate)
+                if world_r or group_r:
+                    targets.append(candidate)
+
     for f in [
         Path.home() / ".npmrc",
         Path.home() / ".pypirc",
         Path.home() / ".netrc",
     ]:
-        if f.exists() and fix_file_permission(f, private=True):
-            fixed += 1
-            _g(f"{t('已收紧', 'Tightened')}: {f}")
-    if fixed:
-        _record_hardening_action("H009", changed_files)
-    return fixed > 0
+        if not f.exists():
+            continue
+        if f.is_symlink() or not f.is_file():
+            _g(
+                f"{t('拒绝跟随凭证文件符号链接', 'Refusing credential-file symlink')}: {f}"
+            )
+            return False
+        targets.append(f)
+
+    # De-duplicate without resolving paths (resolve would follow a link).
+    unique_targets = list(dict.fromkeys(targets))
+    if not unique_targets:
+        return False
+
+    # Preserve the long-standing injectable/dry-run callback contract.  A
+    # replacement fixer has no portable rollback representation unless its
+    # caller also injects a capturer, so do not execute real ACL tools or claim
+    # a durable transaction in that mode.  Production always uses the paired
+    # built-in fixer/capturer below.
+    if capturer is None:
+        changed = False
+        for target in unique_targets:
+            if not fixer(target, private=True):
+                return False
+            changed = True
+            _g(f"{t('已收紧', 'Tightened')}: {target}")
+        return changed
+
+    action_id = _new_action_id("H009")
+    try:
+        snapshot_dir = _action_backup_dir(action_id) / "acl"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(snapshot_dir, 0o700)
+    except Exception:
+        return False
+
+    snapshots: Dict[str, Dict[str, object]] = {}
+    for index, target in enumerate(unique_targets):
+        snapshot = capturer(
+            target, snapshot_dir / f"{index:04d}.acl"
+        )
+        if snapshot is None:
+            _g(
+                f"{t('权限快照失败，未执行任何修改', 'Permission snapshot failed; no changes applied')}: {target}"
+            )
+            return False
+        snapshots[str(target)] = snapshot
+
+    # Persist the complete rollback recipe before touching any ACL/mode.
+    if not _record_hardening_action(
+        "H009",
+        {},
+        snapshots,
+        action_id=action_id,
+        status="pending",
+    ):
+        _g(t("无法写入回滚日志，未执行任何修改。", "Could not write rollback log; no changes applied."))
+        return False
+
+    entry = _get_action_record(action_id)
+    if entry is None:
+        return False
+    for target in unique_targets:
+        if not fixer(target, private=True):
+            _g(f"{t('权限修改失败，正在回滚', 'Permission change failed; rolling back')}: {target}")
+            _, failed = _restore_action(entry)
+            if not failed:
+                _remove_action(action_id)
+            return False
+
+    if not _set_action_status(action_id, "committed"):
+        _g(t("无法提交回滚日志，正在回滚。", "Could not commit rollback log; rolling back."))
+        _, failed = _restore_action(entry)
+        if not failed:
+            _remove_action(action_id)
+        return False
+
+    for target in unique_targets:
+        _g(f"{t('已收紧', 'Tightened')}: {target}")
+    return True
 
 
-def _find_config_files() -> List[Path]:
-    """Find all Claw product config files."""
-    configs = []
-    for d in [
-        Path.home() / ".openclaw",
-        Path.home() / ".zeroclaw",
-        Path.home() / ".claude",
-        Path.home() / ".config" / "openclaw",
-        Path.home() / ".config" / "zeroclaw",
-        Path.home() / ".config" / "claude",
-    ]:
-        if d.exists():
-            for f in d.iterdir():
-                if f.is_file() and f.suffix in (".json",):
-                    configs.append(f)
-    return configs
+def _known_config_paths() -> Dict[str, List[Path]]:
+    """Return exact product config paths; never sweep arbitrary JSON files."""
+    home = Path.home()
+    return {
+        "openclaw": [
+            home / ".openclaw" / "openclaw.json",
+            home / ".config" / "openclaw" / "config.json",
+        ],
+        "zeroclaw": [
+            home / ".zeroclaw" / "config.json",
+            home / ".config" / "zeroclaw" / "config.json",
+        ],
+        "claude-code": [
+            home / ".claude" / "settings.json",
+            home / ".config" / "claude" / "settings.json",
+        ],
+    }
+
+
+def _find_config_files(product: Optional[str] = None) -> List[Path]:
+    """Find only documented config files, optionally scoped to one product."""
+    known = _known_config_paths()
+    candidates = known.get(product, []) if product else [
+        path for paths in known.values() for path in paths
+    ]
+    return [
+        path
+        for path in candidates
+        if path.is_file() and not path.is_symlink()
+    ]
+
+
+def _prepare_json_change(path: Path, key: str, value: Any) -> Optional[dict]:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    parts = key.split(".")
+    target = data
+    for part in parts[:-1]:
+        if not isinstance(target, dict):
+            return None
+        target = target.setdefault(part, {})
+    if not isinstance(target, dict):
+        return None
+    old_val = target.get(parts[-1])
+    target[parts[-1]] = value
+    return {
+        "path": path,
+        "key": key,
+        "value": value,
+        "old_value": old_val,
+        "changed": old_val != value,
+        "data": data,
+        "digest": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _apply_json_changes(
+    changes: List[Tuple[Path, str, Any]], measure_id: str
+) -> int:
+    """Apply a group of JSON changes as one rollbackable action."""
+    prepared: List[dict] = []
+    for path, key, value in changes:
+        change = _prepare_json_change(path, key, value)
+        if change is None:
+            _g(
+                f"{t('配置无效或路径不安全，整组修改已中止', 'Invalid config or unsafe path; grouped change aborted')}: {path}"
+            )
+            return 0
+        if not change["changed"]:
+            _g(
+                f"{path.name}: {key} = {value} "
+                f"({t('已经是目标值', 'already at target value')})"
+            )
+            continue
+        prepared.append(change)
+
+    if not prepared:
+        return 0
+
+    action_id = _new_action_id(measure_id)
+    backups: Dict[str, str] = {}
+    for change in prepared:
+        path = change["path"]
+        backup = _backup_file(path, action_id)
+        if backup is None or _file_digest(backup) != change["digest"]:
+            _g(
+                f"{t('备份失败，整组修改已中止', 'Backup failed; grouped change aborted')}: {path}"
+            )
+            return 0
+        backups[str(path)] = str(backup)
+
+    # Write a pending grouped action before the first mutation.  A process crash
+    # can therefore still be recovered with ``harden --rollback``.
+    if not _record_hardening_action(
+        measure_id,
+        backups,
+        action_id=action_id,
+        status="pending",
+    ):
+        _g(t("无法写入回滚日志，整组修改已中止。", "Could not write rollback log; grouped change aborted."))
+        return 0
+
+    entry = _get_action_record(action_id)
+    if entry is None:
+        return 0
+    for change in prepared:
+        if not _atomic_write_json(
+            change["path"],
+            change["data"],
+            expected_digest=change["digest"],
+        ):
+            _g(
+                f"{t('配置原子写入或校验失败，正在回滚', 'Atomic config write or validation failed; rolling back')}: {change['path']}"
+            )
+            _, failed = _restore_action(entry)
+            if not failed:
+                _remove_action(action_id)
+            return 0
+
+    if not _set_action_status(action_id, "committed"):
+        _g(t("无法提交回滚日志，正在回滚。", "Could not commit rollback log; rolling back."))
+        _, failed = _restore_action(entry)
+        if not failed:
+            _remove_action(action_id)
+        return 0
+
+    for change in prepared:
+        _g(
+            f"{change['path'].name}: {change['key']}: "
+            f"{change['old_value']} → {change['value']}"
+        )
+    return len(prepared)
 
 
 def _patch_json_config(path: Path, key: str, value, measure_id: str) -> bool:
-    """Safely patch a JSON config file: backup → modify → record."""
-    try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return False
-    # Navigate dotted key
-    parts = key.split(".")
-    target = data
-    for p in parts[:-1]:
-        if not isinstance(target, dict):
-            return False
-        target = target.setdefault(p, {})
-    if not isinstance(target, dict):
-        return False
-    old_val = target.get(parts[-1])
-    if old_val == value:
-        _g(f"{path.name}: {key} = {value} ({t('已经是目标值', 'already at target value')})")
-        return False
-    backup_path = _backup_file(path)
-    target[parts[-1]] = value
-    try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-    except Exception:
-        return False
-    changed = {str(path): str(backup_path)} if backup_path else {}
-    _record_hardening_action(measure_id, changed)
-    _g(f"{path.name}: {key}: {old_val} → {value}")
-    return True
+    """Safely patch one JSON config through the grouped transaction path."""
+    return _apply_json_changes([(path, key, value)], measure_id) == 1
 
 
 def _fix_session_retention():
     """H003: Set sessionRetentionDays to 7 in all config files."""
-    fixed = 0
-    for cfg in _find_config_files():
+    changes: List[Tuple[Path, str, Any]] = []
+    for cfg in _find_config_files("openclaw"):
         try:
-            data = json.loads(cfg.read_text())
+            data = json.loads(cfg.read_text(encoding="utf-8"))
         except Exception:
             continue
         val = data.get("sessionRetentionDays")
         if isinstance(val, int) and val > 7:
-            if _patch_json_config(cfg, "sessionRetentionDays", 7, "H003"):
-                fixed += 1
-    if fixed:
+            changes.append((cfg, "sessionRetentionDays", 7))
+    if changes and _apply_json_changes(changes, "H003") == len(changes):
         return True
     _g(t("未找到需要修改的配置文件。", "No config files needed modification."))
     return False
@@ -338,17 +1108,16 @@ def _fix_prompt_baseline():
 
 def _fix_approval_mode():
     """H008: Enable approvalMode in config files."""
-    fixed = 0
-    for cfg in _find_config_files():
+    changes: List[Tuple[Path, str, Any]] = []
+    for cfg in _find_config_files("openclaw"):
         try:
-            data = json.loads(cfg.read_text())
+            data = json.loads(cfg.read_text(encoding="utf-8"))
         except Exception:
             continue
         val = data.get("approvalMode")
         if val in (False, "none", "disabled", None):
-            if _patch_json_config(cfg, "approvalMode", "always", "H008"):
-                fixed += 1
-    if fixed:
+            changes.append((cfg, "approvalMode", "always"))
+    if changes and _apply_json_changes(changes, "H008") == len(changes):
         return True
     _g(t("未找到需要修改的配置文件。", "No config files needed modification."))
     return False

@@ -6,11 +6,12 @@ description: >
   hardening, or skill audit:
   "security scan" "health check" "check skill safety" "harden my claw"
   "drift detection" "red team test" "React2Shell"
-  "agent-scan" "discover installations" "credential audit"
+  "agent-scan" "discover installations" "credential audit" "mcp-live"
+  "supply-chain audit" "SLSA" "container security" "Kubernetes audit" "dynamic scan"
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.5.0"
+    version: "2.6.0"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -22,6 +23,10 @@ metadata:
         - clawlock    # Main binary; works with autoAllowSkills for automatic approval
       bins_optional:
         - promptfoo
+        - osv-scanner
+        - gitleaks
+        - docker
+        - podman
 ---
 
 # ClawLock
@@ -42,8 +47,12 @@ clawlock scan                 # Full security scan
 clawlock discover             # Find all installations
 clawlock precheck ./SKILL.md  # Pre-check new skill
 clawlock harden --auto-fix    # Harden (auto-fix real safe local changes)
+clawlock supply-chain ./project # Structured supply-chain audit
+clawlock runtime-scan ./deploy  # Static Docker/Compose/K8s audit
 clawlock scan --format html   # HTML report
 ```
+
+The CLI currently has **16 commands**. Static checks are local and passive by default; MCP live probing, red-team traffic, external-tool adapters, and container execution require explicit user authorization.
 
 To use as a Claw Skill: copy this file to your skills directory, then request a security check in the relevant Claw product conversation.
 
@@ -61,12 +70,16 @@ After triggering, classify the request and stay narrow — **do not cross featur
 | Harden / tighten config | **Feature 4: Hardening Wizard** | None |
 | SOUL.md / memory file drift | **Feature 5: Drift Detection** | None |
 | Find installations on this machine | **Feature 6: Discovery** | None |
-| Red-team / jailbreak test | **Feature 7: LLM Red-Team** | ⚠️ Requires Node.js + promptfoo / npx |
+| Red-team / jailbreak test | **Feature 7: LLM Red-Team** | ⚠️ Requires explicitly installed promptfoo |
 | MCP server security | **Feature 8: MCP Deep Scan** | None (v1.1 built-in engine) |
 | React2Shell / CVE-2025-55182 | **Feature 9: Dependency CVE checks (integrated into code scans)** | None |
 | Multi-agent security scan | **Feature 10: Agent-Scan** | None (v1.1 built-in engine) |
 | View scan history trends | **Feature 11: Scan History** | None |
 | Continuous monitoring | **Feature 12: Watch Mode** | None |
+| Live MCP inventory / rug-pull drift | **Feature 13: MCP Live** | Local stdio and remote connections both require explicit authorization |
+| Packages, instruction graph, SBOM, SLSA | **Feature 14: Structured Supply Chain** | OSV/Gitleaks optional; never auto-downloaded |
+| Dockerfile / Compose / Kubernetes audit | **Feature 15: Runtime Definition Audit** | None (static reads only) |
+| Isolated behavior analysis | **Feature 16: Dynamic Scan** | Docker/Podman, pinned image, and `--execute` required |
 
 Do not treat normal Claw usage, debugging, or dependency installation as reasons to trigger this skill.
 
@@ -80,14 +93,16 @@ Most checks run **entirely locally**. The following network requests happen only
 |---------|-----------|------------|-----------|
 | CVE advisory query | Product name (fixed string) + version | No file contents, no credentials | None (built-in) |
 | Skill threat intel query | Skill name + source label | No code contents, no user data | None (built-in) |
-| Agent-Scan LLM assessment (optional) | Code snippet (truncated to 8K chars) | No full source, no credentials | Requires `--llm` + API key |
-| promptfoo red-team (optional) | Test prompt payloads | No local files | Requires Node.js and runs through promptfoo or npx |
+| Agent-Scan LLM assessment (optional) | Redacted code/config snippets truncated to 8K chars | No full source; credentials are removed on a best-effort basis | Requires `--llm` + API key |
+| promptfoo red-team (optional) | Test prompt payloads | No local files | Requires an explicitly installed, preferably pinned promptfoo binary |
+| MCP Live HTTP probe (optional) | MCP initialize and inventory requests, plus configured authorization headers | Never invokes an MCP tool; never sends local source | Requires `--allow-remote` |
 
 Offline-first examples:
 
 - Full scan offline: `clawlock scan --no-cve --no-redteam`
 - Single-skill audit offline: `clawlock skill /path/to/skill --no-cloud`
 - If `--llm` is not enabled, Agent-Scan does not make LLM requests
+- Local `supply-chain` analysis, `runtime-scan`, and `dynamic-scan` with its default `none` network do not initiate internet access
 
 In Claw product conversations, you must explicitly tell the user **which online capabilities actually ran, which were skipped, and which were unavailable**.
 
@@ -103,6 +118,9 @@ Before actually calling `clawlock`, perform these minimum checks:
 2. Confirm the scan target is exactly what the user asked for; do not accidentally point a test command at production endpoints or unrelated directories.
 3. If the user wants a local-first or offline evaluation, disable optional online capabilities before proceeding.
 4. If running red-team checks, confirm the current environment is allowed to reach the target endpoint and that the target is appropriate for security testing.
+5. MCP stdio startup requires `--execute`; non-loopback HTTP(S) probing requires `--allow-remote`. Inventory probes do not invoke tools.
+6. `dynamic-scan` requires a `name@sha256:<digest>` image and `--execute`; host networking is forbidden and target code is never executed through a host fallback.
+7. `--trust-snapshot` replaces the trust baseline for later drift checks; use it only after human review of the current inventory.
 
 ---
 
@@ -148,8 +166,12 @@ In Claw product conversations, gracefully degrade and explain the reason in all 
 - CVE API unavailable: continue the remaining local checks and explicitly say "online CVE matching was not completed for this run".
 - Skill cloud intelligence unavailable: continue local static analysis and explicitly say "cloud intelligence unavailable; conclusion based on local rules only".
 - `--llm` not enabled, API key missing, or LLM request failed: keep the local Agent-Scan results and explicitly say the LLM semantic assessment did not run, or why it failed.
-- Node.js / promptfoo / npx / endpoint missing: skip red-team and explicitly say it was skipped and why.
+- promptfoo / endpoint missing: skip red-team and explicitly say why; never download latest implicitly through npx.
+- OSV-Scanner / Gitleaks explicitly requested but missing: do not install or download it; mark that adapter **INCOMPLETE**.
+- MCP live launch/remote probing or dynamic container execution not authorized, or the pinned image/container engine is unavailable: refuse the active operation and mark it **INCOMPLETE**; never execute on the host instead.
+- Artifact, instruction-graph, or source traversal reaches an entry/byte/depth/time budget, or hits a read/parse error: retain the collected evidence ledger and mark the analysis **INCOMPLETE**.
 - If any check is skipped, failed, or unavailable, **never** rewrite that state as "passed" or "no issues found".
+- Security focus command exits: `0`=complete without critical/high, `1`=critical/high present, `2`=requested analysis INCOMPLETE.
 
 ---
 
@@ -201,9 +223,9 @@ Cross-platform detection of running Claw processes and externally exposed ports 
 
 Cross-platform check for overly permissive credential files/directories (Unix: stat bits, Windows: icacls ACL).
 
-### Step 4 — Skill Supply Chain (63 patterns)
+### Step 4 — Skill Supply Chain (Detection Core v2)
 
-Combines **cloud threat intelligence** + **local 63-pattern static analysis**.
+Combines **cloud threat intelligence** + **local deterministic rules** + **project-level dataflow** + **artifact evidence ledger** + **capability chains** + **structured supply-chain analysis**.
 
 #### 4.1 Cloud Intelligence
 
@@ -219,7 +241,7 @@ Combines **cloud threat intelligence** + **local 63-pattern static analysis**.
 
 **Resilience rules:** Cloud failure does not block the scan. One skill failure does not stop others.
 
-#### 4.2 Local Static Analysis (63 patterns)
+#### 4.2 Local Rules And Project-Level Multi-Label Dataflow
 
 🔴 Crit (confirmed malicious): credential exfil (curl/wget) · reverse shell (bash/nc/Python/mkfifo) · crypto mining · destructive deletion · chmod 777 · prompt injection (override/hijack/jailbreak/Chinese) · obfuscated payloads (base64→shell) · zero-width chars · nested shell command obfuscation (`sh -c`/`bash -c`/`cmd /c` multi-layer wrapping to bypass detection)
 
@@ -228,6 +250,19 @@ Combines **cloud threat intelligence** + **local 63-pattern static analysis**.
 🟡 Warn (elevated but potentially legitimate): eval/exec · subprocess · credential env vars · privacy directory access · system sensitive files · external HTTP requests · dynamic imports · ctypes/cffi · pickle deserialization · unsafe YAML · socket server · webhooks · service registration
 
 **Judgment principle:** Escalate to 🔴 Crit only with clear evidence of unauthorized access, exfiltration, destruction, or malicious intent. `eval`, `subprocess`, API key access **alone** = 🟡 Warn only. Combine "declared purpose × actual behavior × exfiltration path" for judgment.
+
+Detection Core v2 tracks untrusted input, secrets, paths, network data, and downloaded content through aliases, reassignment, keyword arguments, function parameters/returns, wrappers, and cross-file calls. A dataflow finding must include a source → propagation → sink evidence path, file/line locations, and confidence. A function that merely looks like a sanitizer must not silently erase risk.
+
+#### 4.3 Artifact Recovery And Evidence Ledger
+
+Inspect ZIP/TAR/wheel/JAR/OOXML, nested archives, and recoverable `.pyc` instructions within entry, byte, depth, compression-ratio, and time budgets. Record traversal/absolute paths, symlinks/hardlinks, encryption, duplicate names, archive bombs, magic/extension mismatch, and source/bytecode mismatch. The ledger includes SHA-256 and complete/incomplete state; exhausting a budget must never be reported as complete.
+
+#### 4.4 Capability Chains And Structured Supply Chain
+
+- Correlate sensitive read → external write, download → execute, memory write → autorun, and untrusted path → write/execute while retaining underlying event evidence.
+- Parse package.json, pyproject.toml, requirements, lockfiles, SBOMs, npm lifecycle hooks, and Python build backends for mutable dependencies and install-time execution.
+- Build recursive external-instruction graphs and check path escape, cycles, depth/node/byte budgets, mutable remote references, pins, and hash drift; remote references are recorded but not fetched by default.
+- Validate in-toto/SLSA subject digests, builder, and source. A DSSE signature being present is not trust unless a separate key policy verifies it cryptographically.
 
 **Output rules:**
 - Risky skills: show permissions + purpose consistency + recommendation
@@ -272,7 +307,7 @@ Queries ClawLock cloud vulnerability intelligence.
 
 9 agent-specific plugins × 8 attack strategies (including encoding bypass).
 
-> ⚠️ **External dependency:** This feature requires Node.js and runs through `promptfoo` or `npx` (for example `npm install -g promptfoo`, or `npx promptfoo@latest`). If the current environment cannot install it, skip this step — the remaining 8 core security domains remain fully functional. In Skill environments where Node.js is typically unavailable, this step auto-skips with an explanation.
+> ⚠️ **External dependency:** The operator must install, and preferably pin, `promptfoo` explicitly. ClawLock will not download and execute latest through `npx`. If it is absent, mark the requested red-team stage incomplete; the other local security domains can still run independently.
 
 ---
 
@@ -301,7 +336,7 @@ Collect minimum context for audit (do not generate lengthy background analysis):
 - Actual capabilities used: file read/write/delete · network access · shell/subprocess · sensitive access (env/credentials/privacy paths)
 - Declared permissions vs actually used permissions gap
 
-**Step 3 — Local static analysis:** Uses a 63-pattern deterministic engine. Judgment principles same as Feature 1 Step 4.
+**Step 3 — Local deterministic analysis:** Uses Detection Core v2 rules, artifact ledger, project-level dataflow, capability chains, and structured supply-chain checks. Judgment principles are the same as Feature 1 Step 4.
 
 ### Output format (strict — do not expand into full report)
 
@@ -462,13 +497,20 @@ Measures not in this table are **guidance only** — the LLM must not attempt au
 ```bash
 clawlock soul --update-baseline    # Update drift baseline
 clawlock discover                  # Discovery (~/.openclaw, ~/.zeroclaw, ~/.claude)
-clawlock redteam URL --deep        # Red-team (10 plugins × 8 strategies) ⚠️ requires promptfoo / npx
-clawlock mcp-scan ./src            # MCP deep code scan (includes dependency CVE checks)
-clawlock agent-scan --code ./src   # OWASP ASI 14 categories (includes dependency CVE checks)
+clawlock redteam URL --deep        # Red-team (10 plugins × 8 strategies) ⚠️ requires installed promptfoo
+clawlock mcp-scan ./src            # MCP deep code scan (includes project-level dataflow)
+clawlock agent-scan --code ./src   # ClawLock ASI 14 compatibility profile (includes dependency checks)
 clawlock agent-scan --code ./src --llm           # Add LLM semantic assessment layer
 ```
 
-> **Dependency note:** All commands except `clawlock redteam` require only `pip install clawlock` — zero external binaries needed. `clawlock redteam` needs Node.js and runs through `promptfoo` or `npx`.
+> **Dependency note:** Local static capabilities need only `pip install clawlock`. Red-team, supply-chain external adapters, and dynamic scanning respectively require user-installed promptfoo, OSV-Scanner/Gitleaks, and Docker/Podman. ClawLock never downloads them automatically.
+
+| Optional Tool | Entry Point | Safety Boundary |
+|---------------|-------------|-----------------|
+| promptfoo | `redteam` / optional full-scan stage | Pre-installed and preferably pinned; never download latest through npx |
+| OSV-Scanner | `supply-chain PATH --osv` | Explicit opt-in only; missing is INCOMPLETE, with no auto-install |
+| Gitleaks | `supply-chain PATH --gitleaks` | Explicit opt-in only; evidence is redacted; missing is INCOMPLETE |
+| Docker / Podman | `dynamic-scan` | Pinned image, `--execute`, restricted container, and no host fallback |
 
 ---
 
@@ -490,6 +532,52 @@ clawlock watch --count 10         # Stop after 10 rounds
 ```
 
 Periodically re-scans config drift + memory file drift + process changes. Alerts immediately when critical changes are detected. Suitable for long-term post-deployment monitoring.
+
+## Feature 13: MCP Live Inventory And Drift
+
+```bash
+clawlock mcp-live ./.mcp.json --server local-fs --execute \
+  --snapshot ./mcp-inventory.snapshot.json
+clawlock mcp-live ./.mcp.json --server remote-api --allow-remote \
+  --snapshot ./mcp-inventory.snapshot.json
+```
+
+- Executes only MCP `initialize`, `tools/list`, `prompts/list`, and `resources/list`; it never invokes a tool.
+- A local stdio server starts only with `--execute`; non-loopback HTTP(S) is contacted only with `--allow-remote`. Unpinned launch packages are refused by default and require separate high-risk authorization through `--allow-unpinned`.
+- Use `--trust-snapshot` only after human review. Later scans compare added/removed tools, prompts, and resources plus schema, annotation, identity, and capability changes to detect tool shadowing and rug-pull drift.
+- `CLAWLOCK_SNAPSHOT_KEY` enables snapshot HMAC. Without it, permissions and an internal fingerprint detect accidental change but do not claim resistance to same-user tampering.
+
+## Feature 14: Structured Supply Chain, Instruction Graph, And SLSA
+
+```bash
+clawlock supply-chain ./project
+clawlock supply-chain ./project --osv --gitleaks
+clawlock supply-chain ./project --provenance ./provenance.json \
+  --expected-digest <sha256> --expected-builder <builder-id> \
+  --expected-source <source-uri> --expected-subject <artifact-name>
+```
+
+The default path performs local structured analysis only. `--osv` / `--gitleaks` call existing binaries with argv rather than a shell and never install them; a requested but unavailable adapter exits `2`. Gitleaks evidence is redacted. SLSA validation checks structure and declared identity, but never calls a DSSE signature trusted without independent key-policy verification.
+
+## Feature 15: Docker / Compose / Kubernetes Runtime Definition Audit
+
+```bash
+clawlock runtime-scan ./deploy
+clawlock runtime-scan ./deploy --format json
+```
+
+Statically audits Dockerfiles, Compose, and Kubernetes YAML without building images, starting containers, or connecting to a cluster. Coverage includes root/privileged mode, host namespaces, hostPath/socket mounts, dangerous capabilities, privilege escalation, seccomp, writable root filesystems, resource limits, hostPort, unpinned images, build secrets, download-then-execute, and unbounded egress. Incomplete reads or parsing exit `2`.
+
+## Feature 16: Pinned-Image Container Dynamic Analysis
+
+```bash
+clawlock dynamic-scan ./skill \
+  --image clawlock-analyzer@sha256:<digest> \
+  --entrypoint-json '["--","python","/workspace/main.py"]' \
+  --execute
+```
+
+Execution is Docker/Podman-only and the image must be SHA-256 digest-pinned. The container is read-only and non-root by default, drops all capabilities, sets `no-new-privileges`, enforces resource/PID/time limits, and uses `network=none`; host networking is forbidden and there is no host fallback. The analyzer correlates sensitive read + network, download + execute, persistence, host escape, canary exfiltration, and prompt/tool injection while redacting canaries and output evidence. Missing consent, pinned image, engine, or complete events exits `2`.
 
 ---
 
@@ -584,12 +672,14 @@ Replace `{target}` with the actual target (e.g. `Claw environment`, `my-skill`, 
 
 ## Capability Boundaries
 
-This skill performs **static analysis**. It cannot:
-- Detect purely runtime malicious behavior
+This skill is **static-first**. Only Features 13/16 perform a live protocol inventory or isolated container behavior analysis after explicit authorization. It cannot:
+- Observe every runtime behavior when code paths are not executed, evade the environment, or exceed budgets
 - Guarantee the absence of unknown vulnerabilities
-- Execute real attacks or confirm exploitability
+- Execute real attacks against unauthorized targets or confirm exploitability
 - Read system privacy directories, session records, or media files
 
-MCP deep scan and Agent-Scan use built-in Python engines (regex + AST taint tracking) with no external binary dependencies. The built-in engines detect known patterns; for complex cross-function semantic vulnerabilities, enable the LLM assessment layer via `--llm` (requires API key).
+MCP deep scan, Skill audit, and Agent-Scan share Detection Core v2 deterministic rules, AST project-level multi-label dataflow, evidence paths, and capability chains. Archives, nested containers, and `.pyc` are covered by a bounded evidence ledger. The LLM semantic layer remains optional and additive; it cannot delete, downgrade, or override a deterministic finding.
+
+Active features never auto-download tools, invoke MCP tools, or execute untrusted target code on the host. Preserve every INCOMPLETE state and handle it as exit code `2`.
 
 All conclusions represent best-effort assessment within current check scope.

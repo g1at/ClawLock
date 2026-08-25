@@ -10,7 +10,15 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from ..utils import IS_ANDROID, IS_MACOS, IS_WINDOWS, find_binary
+from ..utils import (
+    IS_ANDROID,
+    IS_MACOS,
+    IS_WINDOWS,
+    CommandOutputTruncated,
+    find_binary,
+    run_bounded_command,
+    scrub_command_diagnostic,
+)
 
 
 @dataclass
@@ -34,6 +42,15 @@ class AdapterSpec:
 class CveLookupTarget:
     product: str
     version: str
+
+
+class ConfigLoadError(RuntimeError):
+    """An existing adapter config could not be parsed safely."""
+
+    def __init__(self, path: Path, reason: str):
+        self.path = path
+        self.reason = reason
+        super().__init__(f"Could not load config {path}: {reason}")
 
 
 ADAPTERS: Dict[str, AdapterSpec] = {
@@ -116,14 +133,20 @@ _VERSION_COMMANDS: Dict[str, List[List[str]]] = {
 
 def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = run_bounded_command(
+            cmd,
+            timeout=timeout,
+            max_output_bytes=128 * 1024,
+        )
         return (r.returncode, r.stdout.strip(), r.stderr.strip())
     except FileNotFoundError:
         return (-1, "", f"not found: {cmd[0]}")
     except subprocess.TimeoutExpired:
         return (-1, "", "timeout")
+    except CommandOutputTruncated:
+        return (-1, "", "command output exceeded the 131072-byte safety limit")
     except Exception as e:
-        return (-1, "", str(e))
+        return (-1, "", scrub_command_diagnostic(e, max_chars=300))
 
 
 def _binary_search_roots(adapter: AdapterSpec) -> List[Path]:
@@ -184,8 +207,9 @@ def _resolve_binary_path(adapter: AdapterSpec) -> Optional[str]:
     for root in _binary_search_roots(adapter):
         for name in _candidate_binary_names(adapter.bin):
             candidate = root / name
-            if candidate.exists():
-                return str(candidate)
+            resolved = find_binary(str(candidate))
+            if resolved:
+                return resolved
     return None
 
 
@@ -295,12 +319,27 @@ def resolve_cve_lookup(
     return (CveLookupTarget(product=product, version=normalized_version), "")
 
 
-def load_config(adapter: AdapterSpec) -> Tuple[Dict[str, Any], Optional[str]]:
+def load_config(
+    adapter: AdapterSpec,
+    *,
+    strict: bool = False,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    errors: List[ConfigLoadError] = []
     for cp in adapter.config_paths:
         p = Path(cp).expanduser()
         if p.exists():
             try:
-                return (json.loads(p.read_text()), str(p))
-            except Exception:
-                pass
+                payload = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("top-level JSON value must be an object")
+                return (payload, str(p))
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                error = ConfigLoadError(p, str(exc))
+                if strict:
+                    # Config paths are priority-ordered.  A malformed primary
+                    # config must not be hidden by a valid lower-priority file.
+                    raise error from exc
+                errors.append(error)
+    if strict and errors:
+        raise errors[0]
     return ({}, None)
