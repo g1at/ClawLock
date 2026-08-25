@@ -386,7 +386,12 @@ def test_osv_adapter_uses_argv_fixed_timeout_and_parses_json(monkeypatch, tmp_pa
         ]
     }
 
-    monkeypatch.setattr(supply_chain.shutil, "which", lambda _name: "C:/tools/osv-scanner.exe")
+    tool_path = str((tmp_path.parent / "osv-scanner").resolve())
+    monkeypatch.setattr(
+        supply_chain,
+        "_resolve_external_executable",
+        lambda _name, _target: (tool_path, ""),
+    )
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -397,7 +402,7 @@ def test_osv_adapter_uses_argv_fixed_timeout_and_parses_json(monkeypatch, tmp_pa
 
     assert result.complete and result.findings[0].rule_id == "OSV-2026-1"
     command, kwargs = calls[0]
-    assert command[:4] == ["C:/tools/osv-scanner.exe", "scan", "source", "--format"]
+    assert command[:4] == [tool_path, "scan", "source", "--format"]
     assert kwargs["timeout"] == EXTERNAL_TOOL_TIMEOUT_SECONDS
     assert kwargs["shell"] is False
 
@@ -415,7 +420,12 @@ def test_gitleaks_adapter_redacts_secret_at_boundary(monkeypatch, tmp_path):
             "Fingerprint": "fp-1",
         }
     ]
-    monkeypatch.setattr(supply_chain.shutil, "which", lambda _name: "C:/tools/gitleaks.exe")
+    tool_path = str((tmp_path.parent / "gitleaks").resolve())
+    monkeypatch.setattr(
+        supply_chain,
+        "_resolve_external_executable",
+        lambda _name, _target: (tool_path, ""),
+    )
     monkeypatch.setattr(
         supply_chain.subprocess,
         "run",

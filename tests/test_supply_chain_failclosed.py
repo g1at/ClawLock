@@ -492,8 +492,11 @@ def test_external_tool_stderr_is_never_returned(monkeypatch):
 def test_external_tool_unexpected_json_schema_is_incomplete(
     monkeypatch, tmp_path, runner, payload
 ):
+    tool_path = str((tmp_path.parent / "trusted-tool").resolve())
     monkeypatch.setattr(
-        supply_chain.shutil, "which", lambda _name: "C:/trusted/tool.exe"
+        supply_chain,
+        "_resolve_external_executable",
+        lambda _name, _target: (tool_path, ""),
     )
     monkeypatch.setattr(
         supply_chain.subprocess,

@@ -1514,7 +1514,9 @@ def _inspect_disk_file(
     if not state.begin_path(virtual, "file"):
         return
     try:
-        size = path.stat(follow_symlinks=False).st_size
+        # Path.stat(follow_symlinks=...) is only available on Python 3.10+.
+        # lstat() preserves the fail-closed no-symlink behavior on Python 3.9.
+        size = path.lstat().st_size
     except OSError as exc:
         state.add_ledger(virtual, "unreadable", "file", str(exc), True)
         return

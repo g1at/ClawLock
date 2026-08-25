@@ -6,6 +6,7 @@ build/
 .mypy_cache/
 .pytest_cache/
 .stbench/
+pytest-of-*/
 .venv/
 *.bak
 .env
