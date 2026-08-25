@@ -23,6 +23,17 @@ from clawlock.scanners.mcp_runtime import (
 import clawlock.scanners.mcp_runtime as mcp_runtime
 
 
+@pytest.fixture
+def private_mcp_executable(tmp_path):
+    """A hashable launch target with permissions independent of the CI image."""
+    suffix = ".exe" if os.name == "nt" else ""
+    executable = tmp_path / f"fake-mcp-server{suffix}"
+    executable.write_bytes(b"fake MCP executable used with a mocked subprocess")
+    if os.name != "nt":
+        executable.chmod(0o700)
+    return str(executable)
+
+
 def _install_fake_stdio(monkeypatch, responder, *, stderr_text=""):
     captured = {}
 
@@ -278,7 +289,10 @@ def test_stdio_probe_never_starts_without_explicit_consent(tmp_path):
     assert not marker.exists()
 
 
-def test_stdio_probe_collects_inventory_after_consent(monkeypatch):
+def test_stdio_probe_collects_inventory_after_consent(
+    monkeypatch,
+    private_mcp_executable,
+):
     captured = {}
     monkeypatch.setenv("ANTHROPIC_API_KEY", "host-secret-must-not-be-inherited")
 
@@ -366,7 +380,7 @@ def test_stdio_probe_collects_inventory_after_consent(monkeypatch):
     result = asyncio.run(
         probe_stdio_server(
             "fake",
-            sys.executable,
+            private_mcp_executable,
             ["fake_mcp.py"],
             env={"EXPLICIT_SERVER_VALUE": "configured"},
             allow_execute=True,
@@ -411,6 +425,41 @@ def test_windows_mode_bits_do_not_report_world_writable_executable():
     assert "MCP-LAUNCH-WORLD-WRITABLE" not in {issue.rule_id for issue in issues}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit regression")
+def test_posix_world_writable_executable_is_rejected(tmp_path):
+    executable = tmp_path / "world-writable-mcp"
+    executable.write_bytes(b"not trusted")
+    executable.chmod(0o707)
+
+    issues = audit_server_config(
+        "world-writable",
+        {"command": str(executable), "args": []},
+    )
+
+    assert "MCP-LAUNCH-WORLD-WRITABLE" in {issue.rule_id for issue in issues}
+    assert (
+        mcp_runtime._secure_resolve_executable(str(executable))  # noqa: SLF001
+        is None
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit regression")
+def test_posix_private_executable_under_temporary_root_is_eligible(tmp_path):
+    executable = tmp_path / "private-mcp"
+    executable.write_bytes(b"controlled")
+    executable.chmod(0o700)
+
+    issues = audit_server_config(
+        "private",
+        {"command": str(executable), "args": []},
+    )
+
+    assert "MCP-LAUNCH-WORLD-WRITABLE" not in {issue.rule_id for issue in issues}
+    assert mcp_runtime._secure_resolve_executable(  # noqa: SLF001
+        str(executable)
+    ) == str(executable.resolve())
+
+
 def test_secure_executable_resolution_ignores_cwd_and_relative_path(
     monkeypatch,
     tmp_path,
@@ -429,7 +478,7 @@ def test_secure_executable_resolution_ignores_cwd_and_relative_path(
         )
 
 
-def test_stdio_probe_collects_all_cursor_pages(monkeypatch):
+def test_stdio_probe_collects_all_cursor_pages(monkeypatch, private_mcp_executable):
     def responder(request):
         method = request["method"]
         if method == "initialize":
@@ -453,7 +502,7 @@ def test_stdio_probe_collects_all_cursor_pages(monkeypatch):
     result = asyncio.run(
         probe_stdio_server(
             "paged",
-            sys.executable,
+            private_mcp_executable,
             [],
             allow_execute=True,
             timeout=3,
@@ -465,7 +514,10 @@ def test_stdio_probe_collects_all_cursor_pages(monkeypatch):
     assert [tool.name for tool in result.inventory.tools] == ["first", "second"]
 
 
-def test_repeated_cursor_makes_advertised_inventory_incomplete(monkeypatch):
+def test_repeated_cursor_makes_advertised_inventory_incomplete(
+    monkeypatch,
+    private_mcp_executable,
+):
     def responder(request):
         method = request["method"]
         if method == "initialize":
@@ -483,7 +535,7 @@ def test_repeated_cursor_makes_advertised_inventory_incomplete(monkeypatch):
     result = asyncio.run(
         probe_stdio_server(
             "loop",
-            sys.executable,
+            private_mcp_executable,
             [],
             allow_execute=True,
             timeout=3,
@@ -524,7 +576,10 @@ def test_paginated_inventory_enforces_page_and_item_budgets(monkeypatch):
         )
 
 
-def test_advertised_prompt_and_resource_failures_are_fail_closed(monkeypatch):
+def test_advertised_prompt_and_resource_failures_are_fail_closed(
+    monkeypatch,
+    private_mcp_executable,
+):
     def responder(request):
         method = request["method"]
         if method == "initialize":
@@ -540,7 +595,7 @@ def test_advertised_prompt_and_resource_failures_are_fail_closed(monkeypatch):
     result = asyncio.run(
         probe_stdio_server(
             "advertised",
-            sys.executable,
+            private_mcp_executable,
             [],
             allow_execute=True,
             timeout=3,
@@ -611,7 +666,10 @@ def test_inventory_canonical_captures_protocol_fields_and_scrubs_secrets():
     assert secret not in json.dumps(canonical)
 
 
-def test_stdio_error_and_stderr_never_echo_explicit_secret(monkeypatch):
+def test_stdio_error_and_stderr_never_echo_explicit_secret(
+    monkeypatch,
+    private_mcp_executable,
+):
     secret = "stdio-super-secret-value"
 
     def responder(request):
@@ -628,7 +686,7 @@ def test_stdio_error_and_stderr_never_echo_explicit_secret(monkeypatch):
     result = asyncio.run(
         probe_stdio_server(
             "secret-error",
-            sys.executable,
+            private_mcp_executable,
             [],
             env={"PUBLIC_VALUE": secret},
             allow_execute=True,

@@ -10,6 +10,21 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def private_command(tmp_path):
+    """Build real commands whose executable permissions the test controls."""
+
+    def build(name, *, posix_source, python_source):
+        if os.name == "nt":
+            return [sys.executable, "-c", python_source]
+        executable = tmp_path / name
+        executable.write_text(f"#!/bin/sh\n{posix_source}\n", encoding="utf-8")
+        executable.chmod(0o700)
+        return [str(executable)]
+
+    return build
+
+
 def test_trusted_binary_resolution_rejects_current_directory_dropper(
     tmp_path, monkeypatch
 ):
@@ -42,26 +57,47 @@ def test_trusted_binary_resolution_ignores_empty_and_relative_path_entries(
     assert utils.resolve_trusted_binary("promptfoo", path=unsafe_path) is None
 
 
-def test_bounded_command_fails_closed_when_stdout_is_oversized():
+def test_bounded_command_fails_closed_when_stdout_is_oversized(private_command):
     from clawlock.utils import CommandOutputTruncated, run_bounded_command
 
+    command = private_command(
+        "oversized-output",
+        posix_source=f"printf '%s' '{'x' * 2048}'",
+        python_source="import sys; sys.stdout.write('x' * 65536)",
+    )
     with pytest.raises(CommandOutputTruncated, match="safety limit"):
         run_bounded_command(
-            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 65536)"],
+            command,
             timeout=10,
             max_output_bytes=1024,
         )
 
 
-def test_bounded_command_terminates_on_timeout():
+def test_bounded_command_terminates_on_timeout(private_command):
     from clawlock.utils import run_bounded_command
 
+    command = private_command(
+        "never-finishes",
+        posix_source="while :; do :; done",
+        python_source="import time; time.sleep(10)",
+    )
     with pytest.raises(subprocess.TimeoutExpired):
         run_bounded_command(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
+            command,
             timeout=0.2,
             max_output_bytes=1024,
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit regression")
+def test_trusted_binary_resolution_rejects_world_writable_file(tmp_path):
+    import clawlock.utils as utils
+
+    executable = tmp_path / "world-writable"
+    executable.write_bytes(b"not trusted")
+    executable.chmod(0o707)
+
+    assert utils.resolve_trusted_binary(str(executable)) is None
 
 
 def test_promptfoo_scrubs_secrets_from_child_stderr(monkeypatch):

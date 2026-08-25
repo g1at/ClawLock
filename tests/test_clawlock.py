@@ -1337,10 +1337,20 @@ class TestPlatformUtils:
         assert p.parent.exists()
         assert "clawlock_test.json" in str(p)
 
-    def test_find_binary(self):
-        from clawlock.utils import find_binary
+    def test_find_binary(self, tmp_path, monkeypatch):
+        import clawlock.utils as utils
 
-        assert find_binary("python3") is not None or find_binary("python") is not None
+        name = "clawlock-test-python"
+        suffix = ".exe" if utils.IS_WINDOWS else ""
+        executable = tmp_path / f"{name}{suffix}"
+        executable.write_bytes(b"controlled test executable")
+        if not utils.IS_WINDOWS:
+            executable.chmod(0o700)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        if utils.IS_WINDOWS:
+            monkeypatch.setenv("PATHEXT", ".EXE")
+
+        assert utils.find_binary(name) == str(executable)
 
     def test_list_processes(self, monkeypatch):
         from types import SimpleNamespace

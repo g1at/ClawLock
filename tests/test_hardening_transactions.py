@@ -115,6 +115,27 @@ def test_grouped_config_action_rolls_back_every_member(
     assert json.loads(log_path.read_text(encoding="utf-8")) == []
 
 
+def test_transaction_accepts_isolated_backup_root_outside_home(
+    tmp_path, monkeypatch, isolated_hardening_state
+):
+    log_path, _ = isolated_hardening_state
+    unrelated_home = tmp_path / "unrelated-home"
+    unrelated_home.mkdir()
+    monkeypatch.setattr(hardening.Path, "home", lambda: unrelated_home)
+    config = tmp_path / "config.json"
+    config.write_text('{"approvalMode": "none"}', encoding="utf-8")
+
+    assert hardening._patch_json_config(
+        config, "approvalMode", "always", "H008"
+    )
+    assert json.loads(config.read_text(encoding="utf-8"))["approvalMode"] == "always"
+    records = json.loads(log_path.read_text(encoding="utf-8"))
+    assert len(records) == 1
+    assert records[0]["status"] == "committed"
+    assert hardening.rollback_last() == 1
+    assert json.loads(config.read_text(encoding="utf-8"))["approvalMode"] == "none"
+
+
 def test_post_write_validation_failure_restores_original(
     tmp_path, monkeypatch, isolated_hardening_state
 ):

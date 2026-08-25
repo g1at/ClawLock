@@ -275,13 +275,23 @@ def _path_in_action_dir(path: Path, action_id: str) -> bool:
                 return False
         if candidate.exists() and candidate.is_symlink():
             return False
-        resolved_home = _absolute_path(Path.home()).resolve(strict=True)
         resolved_root = root.resolve(strict=False)
         resolved_action = action_dir.resolve(strict=False)
         resolved_candidate = candidate.resolve(strict=False)
+        default_root = _absolute_path(
+            Path.home() / ".clawlock" / "backups"
+        )
+        if root == default_root:
+            # Preserve the home boundary for the built-in location so a
+            # symlink/reparse escape in the storage path remains fail-closed.
+            resolved_home = _absolute_path(Path.home()).resolve(strict=True)
+            if not _is_within(resolved_root, resolved_home):
+                return False
+        # An explicitly injected root (for example a POSIX /tmp test root) is
+        # its own trust anchor.  Every candidate must still remain inside its
+        # action directory after resolution.
         return (
-            _is_within(resolved_root, resolved_home)
-            and _is_within(resolved_action, resolved_root)
+            _is_within(resolved_action, resolved_root)
             and _is_within(resolved_candidate, resolved_action)
         )
     except Exception:

@@ -1463,8 +1463,10 @@ def _secure_resolve_executable(command: str) -> Optional[str]:
             resolved = candidate.resolve(strict=True)
             if not resolved.is_file():
                 continue
-            if os.name != "nt" and not os.access(str(resolved), os.X_OK):
-                continue
+            if os.name != "nt":
+                mode = resolved.stat().st_mode
+                if mode & stat.S_IWOTH or not os.access(str(resolved), os.X_OK):
+                    continue
             return str(resolved)
         except OSError:
             continue
@@ -1476,6 +1478,8 @@ def _hash_executable(path: str) -> Tuple[str, int, str]:
     file_stat = resolved.stat()
     if not stat.S_ISREG(file_stat.st_mode):
         raise ValueError("MCP executable is not a regular file")
+    if os.name != "nt" and file_stat.st_mode & stat.S_IWOTH:
+        raise ValueError("MCP executable is world-writable")
     if file_stat.st_size > _MAX_EXECUTABLE_BYTES:
         raise ValueError("MCP executable exceeds the digest byte budget")
     digest = hashlib.sha256()
@@ -1492,6 +1496,10 @@ def _hash_executable(path: str) -> Tuple[str, int, str]:
     after = resolved.stat()
     if (after.st_size, after.st_mtime_ns) != (file_stat.st_size, file_stat.st_mtime_ns):
         raise RuntimeError("MCP executable changed while its digest was computed")
+    if os.name != "nt" and after.st_mode & stat.S_IWOTH:
+        raise RuntimeError(
+            "MCP executable became world-writable while its digest was computed"
+        )
     return digest.hexdigest(), consumed, str(resolved)
 
 

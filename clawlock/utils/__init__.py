@@ -102,6 +102,13 @@ def _trusted_binary_candidate(
         return None
     if not stat.S_ISREG(info.st_mode):
         return None
+    if os.name != "nt":
+        # A PATH entry that every local user can replace is never a trusted
+        # executable, even when it is outside the scanned repository.
+        if info.st_mode & stat.S_IWOTH:
+            return None
+        if not os.access(str(lexical), os.X_OK):
+            return None
     return str(lexical)
 
 
