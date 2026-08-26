@@ -6,6 +6,13 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish this version tag to PyPI"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -28,7 +35,9 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish)
     permissions:
       id-token: write
     steps:
