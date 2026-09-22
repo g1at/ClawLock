@@ -47,7 +47,9 @@ def test_sensitive_read_to_external_write_is_a_composite_chain():
         Capability.EXTERNAL_WRITE,
     ]
     assert len(set(detection.event_ids)) == 2
-    assert detection.severity == "critical"
+    assert detection.severity == "medium"
+    assert detection.confidence <= 0.6
+    assert detection.metadata["evidence_kind"] == "text-heuristic"
 
 
 def test_single_capability_and_unrelated_network_request_do_not_form_attack_chain():

@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.6.0 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
+ClawLock v2.6.1 core scanners — Finding model, config audit, skill supply-chain (55+ patterns),
 SOUL.md + memory file drift, MCP exposure + 6 tool poisoning patterns, process detection,
 credential directory audit, installation discovery, risky env vars, skill precheck.
 """
@@ -847,14 +847,42 @@ def discover_installations() -> List[Finding]:
 
 def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
     """Audit credential directories and files for overly permissive access (cross-platform)."""
+    import stat
+
     from ..utils import check_file_permission, IS_WINDOWS
 
     findings = []
+
+    def incomplete(path: Path, exc: Exception) -> None:
+        findings.append(Finding(
+            "credential",
+            INFO,
+            t("凭证权限检查未完成", "Credential permission inspection incomplete"),
+            t(
+                f"无法读取权限或遍历凭证路径（{type(exc).__name__}）。",
+                f"Could not read permissions or enumerate the credential path ({type(exc).__name__}).",
+            ),
+            str(path),
+            remediation=t("检查路径访问权限及权限检查工具后重试。", "Check path access and permission inspection tools, then retry."),
+            metadata={
+                "scan_status": "error",
+                "requested": True,
+                "component": "credential_permissions",
+                "rule_id": "CRED-CHECK-INCOMPLETE",
+            },
+        ))
+
     fix_hint = t("使用 icacls 移除 Everyone/Users 访问权限", "Use icacls to remove Everyone/Users access") if IS_WINDOWS else "chmod 700"
     fix_hint_f = t("使用 icacls 限制为仅所有者访问", "Use icacls to restrict to owner-only access") if IS_WINDOWS else "chmod 600"
     for cred_path_str in adapter.credential_dirs:
         cred_path = Path(cred_path_str).expanduser()
-        if not cred_path.exists():
+        try:
+            path_stat = cred_path.stat()
+        except FileNotFoundError:
+            # Adapter roots are optional until an installation creates them.
+            continue
+        except Exception as exc:
+            incomplete(cred_path, exc)
             continue
         try:
             world_r, group_r, desc = check_file_permission(cred_path)
@@ -880,15 +908,19 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
                         remediation=f"{fix_hint} {cred_path}",
                     )
                 )
-            if cred_path.is_dir():
+            if stat.S_ISDIR(path_stat.st_mode):
                 for f in cred_path.iterdir():
-                    if f.is_file() and f.suffix in (
+                    if f.suffix not in (
                         ".json",
                         ".key",
                         ".pem",
                         ".token",
                         ".env",
                     ):
+                        continue
+                    try:
+                        if not stat.S_ISREG(f.stat().st_mode):
+                            continue
                         fw, _, fd = check_file_permission(f)
                         if fw:
                             findings.append(
@@ -901,8 +933,10 @@ def scan_credential_dirs(adapter: AdapterSpec) -> List[Finding]:
                                     remediation=f"{fix_hint_f} {f}",
                                 )
                             )
-        except Exception:
-            pass
+                    except Exception as exc:
+                        incomplete(f, exc)
+        except Exception as exc:
+            incomplete(cred_path, exc)
     return findings
 
 

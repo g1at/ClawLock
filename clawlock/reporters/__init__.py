@@ -1,4 +1,4 @@
-﻿"""ClawLock v2.6.0 report renderer - Rich terminal + JSON + HTML output."""
+﻿"""ClawLock v2.6.1 report renderer - Rich terminal + JSON + HTML output."""
 
 from __future__ import annotations
 

@@ -143,23 +143,23 @@ def test_post_write_validation_failure_restores_original(
     config = tmp_path / "config.json"
     original = b'{"approvalMode": "none"}\n'
     config.write_bytes(original)
-    real_replace = hardening.os.replace
-    corrupted = False
+    real_read_text = hardening.Path.read_text
+    validation_failed = False
 
-    def corrupt_first_config_replace(source, destination):
-        nonlocal corrupted
-        real_replace(source, destination)
-        if Path(destination) == config and not corrupted:
-            corrupted = True
-            config.write_text("{not-json", encoding="utf-8")
+    def fail_first_post_write_read(path, *args, **kwargs):
+        nonlocal validation_failed
+        if path == config and not validation_failed:
+            validation_failed = True
+            raise OSError("temporary validation read failure")
+        return real_read_text(path, *args, **kwargs)
 
-    monkeypatch.setattr(hardening, "_replace_path", corrupt_first_config_replace)
+    monkeypatch.setattr(hardening.Path, "read_text", fail_first_post_write_read)
 
     assert (
         hardening._patch_json_config(config, "approvalMode", "always", "H008")
         is False
     )
-    assert corrupted is True
+    assert validation_failed is True
     assert config.read_bytes() == original
     assert json.loads(log_path.read_text(encoding="utf-8")) == []
 
@@ -175,7 +175,7 @@ def test_rollback_failure_keeps_complete_action_log(
     )
     action_before = json.loads(log_path.read_text(encoding="utf-8"))[0]
     monkeypatch.setattr(
-        hardening, "_restore_file_from_backup", lambda _original, _backup: False
+        hardening, "_restore_file_from_backup", lambda _original, _backup, **_kwargs: False
     )
 
     assert hardening.rollback_last() == 0

@@ -5,7 +5,7 @@ import json
 import py_compile
 import zipfile
 
-from clawlock.scanners import CRIT, HIGH, scan_skill
+from clawlock.scanners import CRIT, HIGH, WARN, scan_skill
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
@@ -76,13 +76,31 @@ def test_scan_skill_synthesizes_sensitive_read_to_exfiltration(tmp_path):
 
     findings = scan_skill(tmp_path)
 
-    composite = next(
-        finding
-        for finding in findings
+    composites = [
+        finding for finding in findings
         if finding.metadata.get("rule_id") == "CAP-EXFIL-001"
+    ]
+    # Per-file text candidates precede project-level structured findings.
+    # The confirmed flow must retain its severity regardless of that order.
+    structured, = [
+        finding for finding in composites
+        if finding.metadata.get("evidence_kind") == "structured-dataflow"
+    ]
+    assert structured.level == CRIT
+    assert [
+        (event["location"], event["line"])
+        for event in structured.metadata["evidence_path"]
+    ] == [("send.py", 1), ("send.py", 2)]
+    assert all(
+        event["metadata"]["origin"] == "dataflow-finding"
+        for event in structured.metadata["evidence_path"]
     )
-    assert composite.level == CRIT
-    assert len(composite.metadata["evidence_path"]) == 2
+    heuristic, = [
+        finding for finding in composites
+        if finding.metadata.get("evidence_kind") == "text-heuristic"
+    ]
+    assert heuristic.level == WARN
+    assert heuristic.metadata["confidence_score"] <= 0.6
 
 
 def test_scan_skill_structured_supply_chain_and_instruction_graph(tmp_path):

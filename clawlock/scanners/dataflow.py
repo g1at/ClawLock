@@ -574,7 +574,10 @@ def _target_key(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _merge(*values: _Value) -> _Value:
+_MAX_VALUE_TRACES = 64
+
+
+def _merge(*values: _Value, state: _BudgetState, span: FlowSpan) -> _Value:
     traces: Dict[Tuple[Any, ...], _Trace] = {}
     types: Set[str] = set()
     for value in values:
@@ -595,7 +598,16 @@ def _merge(*values: _Value) -> _Value:
             tuple(sorted(kind.value for kind in item.guards)),
         ),
     )
-    return _Value(tuple(ordered[:64]), frozenset(types))
+    if len(ordered) > _MAX_VALUE_TRACES:
+        state.error(
+            "DFV2-TRACE-LIMIT",
+            f"Value merge at {span.file}:{span.line}:{span.column} exceeds the "
+            f"{_MAX_VALUE_TRACES} trace limit; {len(ordered) - _MAX_VALUE_TRACES} "
+            "distinct source traces were omitted, so data-flow coverage is incomplete.",
+            span,
+            once=True,
+        )
+    return _Value(tuple(ordered[:_MAX_VALUE_TRACES]), frozenset(types))
 
 
 def _with_step(value: _Value, step: FlowStep) -> _Value:
@@ -806,7 +818,12 @@ class _FunctionAnalyzer:
 
     def run(self) -> _Summary:
         self._block(self.info.node.body)
-        return _Summary(_merge(*self.returns) if self.returns else _Value(), tuple(self.effects))
+        return _Summary(self._merge(self.info.node, *self.returns) if self.returns else _Value(), tuple(self.effects))
+
+    def _merge(self, node: ast.AST, *values: _Value) -> _Value:
+        # State is explicit and belongs to this invocation, including merges
+        # performed while binding arguments or instantiating function summaries.
+        return _merge(*values, state=self.state, span=_span(self.info.module.path, node))
 
     def _block(self, statements: Sequence[ast.stmt]) -> bool:
         for statement in statements:
@@ -825,7 +842,7 @@ class _FunctionAnalyzer:
             self._assign(node.target, self._eval(node.value) if node.value else _Value(), node)
         elif isinstance(node, ast.AugAssign):
             key = _target_key(node.target)
-            self._assign(node.target, _merge(self.env.get(key or "", _Value()), self._eval(node.value)), node)
+            self._assign(node.target, self._merge(node, self.env.get(key or "", _Value()), self._eval(node.value)), node)
         elif isinstance(node, ast.Expr):
             self._eval(node.value)
         elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
@@ -861,21 +878,21 @@ class _FunctionAnalyzer:
             elif else_exits and not body_exits:
                 self.env = body_env
             else:
-                self.env = self._merge_envs(body_env, else_env)
+                self.env = self._merge_envs(body_env, else_env, node=node)
             return body_exits and else_exits
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             iterable = self._eval(node.iter)
             before = dict(self.env)
             self._assign(node.target, iterable, node)
             self._block(node.body)
-            self.env = self._merge_envs(before, self.env)
+            self.env = self._merge_envs(before, self.env, node=node)
             self._block(node.orelse)
         elif isinstance(node, ast.While):
             self._eval(node.test)
             before = dict(self.env)
             self._apply_condition(self.env, node.test, True)
             self._block(node.body)
-            self.env = self._merge_envs(before, self.env)
+            self.env = self._merge_envs(before, self.env, node=node)
             self._block(node.orelse)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
@@ -893,16 +910,16 @@ class _FunctionAnalyzer:
                     self.env[handler.name] = _Value()
                 self._block(handler.body)
                 envs.append(dict(self.env))
-            self.env = self._merge_envs(*envs)
+            self.env = self._merge_envs(*envs, node=node)
             self._block(node.orelse)
             self._block(node.finalbody)
         return False
 
-    def _merge_envs(self, *envs: Mapping[str, _Value]) -> Dict[str, _Value]:
+    def _merge_envs(self, *envs: Mapping[str, _Value], node: ast.AST) -> Dict[str, _Value]:
         keys: Set[str] = set()
         for env in envs:
             keys.update(env)
-        return {key: _merge(*(env.get(key, _Value()) for env in envs)) for key in keys}
+        return {key: self._merge(node, *(env.get(key, _Value()) for env in envs)) for key in keys}
 
     def _assign(self, target: ast.AST, value: _Value, node: ast.AST) -> None:
         if isinstance(target, (ast.Tuple, ast.List)):
@@ -952,29 +969,29 @@ class _FunctionAnalyzer:
                     labels.add(FlowLabel.SECRET)
                 return self._source("environment", secret or base_name, labels, node, Confidence.HIGH)
             value = self._eval(node.value)
-            return _merge(value, self._eval(node.slice))
+            return self._merge(node, value, self._eval(node.slice))
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            return _merge(*(self._eval(item) for item in node.elts))
+            return self._merge(node, *(self._eval(item) for item in node.elts))
         if isinstance(node, ast.Dict):
-            return _merge(*(self._eval(item) for pair in zip(node.keys, node.values) for item in pair if item is not None))
+            return self._merge(node, *(self._eval(item) for pair in zip(node.keys, node.values) for item in pair if item is not None))
         if isinstance(node, ast.BinOp):
-            return _merge(self._eval(node.left), self._eval(node.right))
+            return self._merge(node, self._eval(node.left), self._eval(node.right))
         if isinstance(node, ast.BoolOp):
-            return _merge(*(self._eval(item) for item in node.values))
+            return self._merge(node, *(self._eval(item) for item in node.values))
         if isinstance(node, ast.UnaryOp):
             return self._eval(node.operand)
         if isinstance(node, ast.Compare):
-            return _merge(self._eval(node.left), *(self._eval(item) for item in node.comparators))
+            return self._merge(node, self._eval(node.left), *(self._eval(item) for item in node.comparators))
         if isinstance(node, ast.IfExp):
-            return _merge(self._eval(node.test), self._eval(node.body), self._eval(node.orelse))
+            return self._merge(node, self._eval(node.test), self._eval(node.body), self._eval(node.orelse))
         if isinstance(node, ast.JoinedStr):
-            return _merge(*(self._eval(item) for item in node.values))
+            return self._merge(node, *(self._eval(item) for item in node.values))
         if isinstance(node, ast.FormattedValue):
             return self._eval(node.value)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            return _merge(self._eval(node.elt), *(self._eval(gen.iter) for gen in node.generators))
+            return self._merge(node, self._eval(node.elt), *(self._eval(gen.iter) for gen in node.generators))
         if isinstance(node, ast.DictComp):
-            return _merge(self._eval(node.key), self._eval(node.value), *(self._eval(gen.iter) for gen in node.generators))
+            return self._merge(node, self._eval(node.key), self._eval(node.value), *(self._eval(gen.iter) for gen in node.generators))
         if isinstance(node, ast.NamedExpr):
             value = self._eval(node.value)
             self._assign(node.target, value, node)
@@ -983,7 +1000,7 @@ class _FunctionAnalyzer:
             return self._eval(node.value)
         if isinstance(node, ast.Call):
             return self._call(node)
-        return _merge(*(self._eval(child) for child in ast.iter_child_nodes(node)))
+        return self._merge(node, *(self._eval(child) for child in ast.iter_child_nodes(node)))
 
     def _call(self, node: ast.Call) -> _Value:
         raw = _name(node.func)
@@ -992,13 +1009,13 @@ class _FunctionAnalyzer:
         args = [self._eval(item) for item in node.args]
         kwargs = {item.arg: self._eval(item.value) for item in node.keywords if item.arg}
         splats = [self._eval(item.value) for item in node.keywords if item.arg is None]
-        combined = _merge(receiver, *args, *kwargs.values(), *splats)
+        combined = self._merge(node, receiver, *args, *kwargs.values(), *splats)
         callee = self._resolve_callee(node, canonical, receiver)
 
         sink = _sink_for(canonical, raw, node, receiver.types)
         if sink is not None:
             kind, argument = sink
-            sink_value = self._sink_value(kind, receiver, args, kwargs, combined)
+            sink_value = self._sink_value(node, kind, receiver, args, kwargs, combined)
             self._effect(kind, canonical or raw, node, sink_value, argument)
 
         special = self._special_source(node, canonical or raw, combined, receiver)
@@ -1069,10 +1086,10 @@ class _FunctionAnalyzer:
             if name in result:
                 result[name] = value
             elif callee.node.args.kwarg:
-                result[callee.node.args.kwarg.arg] = _merge(result.get(callee.node.args.kwarg.arg, _Value()), value)
+                result[callee.node.args.kwarg.arg] = self._merge(node, result.get(callee.node.args.kwarg.arg, _Value()), value)
         if splats and callee.node.args.kwarg:
             key = callee.node.args.kwarg.arg
-            result[key] = _merge(result.get(key, _Value()), *splats)
+            result[key] = self._merge(node, result.get(key, _Value()), *splats)
         return result
 
     def _instantiate(self, key: str, bindings: Mapping[str, _Value], call: ast.Call) -> _Value:
@@ -1096,8 +1113,8 @@ class _FunctionAnalyzer:
         for effect in summary.effects:
             traces = tuple(item for trace in effect.traces for item in substitute(trace))
             if traces:
-                self.effects.append(_SinkEffect(effect.sink, _merge(_Value(traces)).traces))
-        return _Value(_merge(_Value(returned_traces)).traces, summary.returned.types)
+                self.effects.append(_SinkEffect(effect.sink, self._merge(call, _Value(traces)).traces))
+        return _Value(self._merge(call, _Value(returned_traces)).traces, summary.returned.types)
 
     def _special_source(self, node: ast.Call, symbol: str, combined: _Value, receiver: _Value) -> Optional[_Value]:
         lowered = symbol.lower()
@@ -1136,18 +1153,18 @@ class _FunctionAnalyzer:
         return _Value((_Trace(_Origin(source=source), label_set, steps=(step,), confidence=confidence),))
 
     def _sink_value(
-        self, kind: SinkKind, receiver: _Value, args: Sequence[_Value],
+        self, node: ast.Call, kind: SinkKind, receiver: _Value, args: Sequence[_Value],
         kwargs: Mapping[str, _Value], combined: _Value,
     ) -> _Value:
         if kind in {SinkKind.COMMAND, SinkKind.CODE_EXECUTION}:
             preferred = [kwargs[name] for name in ("args", "command", "cmd", "url", "code", "source") if name in kwargs]
-            return _merge(*(preferred or list(args[:1]) or [combined]))
+            return self._merge(node, *(preferred or list(args[:1]) or [combined]))
         if kind == SinkKind.NETWORK:
             # Both the destination and headers/body/query values matter: the
             # former models SSRF, while the latter models data exfiltration.
             return combined
         if kind == SinkKind.FILE_WRITE:
-            return _merge(receiver, *(args[:2]), *kwargs.values())
+            return self._merge(node, receiver, *(args[:2]), *kwargs.values())
         return combined
 
     def _effect(self, kind: SinkKind, symbol: str, node: ast.AST, value: _Value, argument: str) -> None:
@@ -1155,7 +1172,7 @@ class _FunctionAnalyzer:
         if not traces:
             return
         sink = FlowSink(kind, symbol, _span(self.info.module.path, node), argument, Confidence.HIGH)
-        self.effects.append(_SinkEffect(sink, _merge(_Value(traces)).traces))
+        self.effects.append(_SinkEffect(sink, self._merge(node, _Value(traces)).traces))
 
     def _apply_condition(self, env: Dict[str, _Value], test: ast.AST, truth: bool) -> None:
         if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):

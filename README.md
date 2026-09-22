@@ -100,7 +100,7 @@ Detection Core v2 correlates evidence instead of treating every suspicious token
 
 - **Project-level multi-label dataflow** tracks untrusted input, secrets, file paths, network data, and downloaded content through aliases, assignments, arguments, returns, wrappers, and cross-file calls. Findings include source-to-sink evidence paths and confidence.
 - **Artifact recovery with an evidence ledger** safely inspects ZIP/TAR/wheel/JAR/OOXML content, nested containers, and recoverable `.pyc` instructions under entry, byte, depth, ratio, and time budgets. Path traversal, links, encryption, duplicate names, magic/extension mismatch, and source/bytecode mismatch remain visible in the ledger.
-- **Capability-chain correlation** joins events such as sensitive read → external write, download → execute, memory write → autorun, and untrusted path → write/execute. This raises confidence for meaningful attack chains while retaining the underlying evidence.
+- **Capability-chain correlation** joins events such as sensitive read → external write, download → execute, memory write → autorun, and untrusted path → write/execute. Structured dataflow evidence retains its severity and confidence; text-only associations are marked as unconfirmed, medium-severity findings for review. Parseable Python text uses separate lexical scopes and excludes comments and docstrings from correlation evidence.
 - **Structured supply-chain checks** parse manifests and lockfiles, npm lifecycle hooks, Python build backends, mutable dependencies, SBOMs, recursive instruction references, pin/hash drift, and in-toto/SLSA statements. Remote instructions are recorded but not fetched by default. A DSSE signature is reported as present but is never called trusted without an independent verification policy.
 - **Live and runtime evidence** can inventory an explicitly selected MCP server, compare a trusted snapshot for tool/prompt/resource drift, audit deployment definitions, or run bounded behavior analysis in a pinned container.
 
@@ -240,6 +240,8 @@ ClawLock currently ships **18 hardening measures**.
 - `clawlock harden --auto-fix --verify`: auto-fix then re-scan to confirm the fix worked
 - `clawlock harden --rollback`: undo the last auto-fix action (restores from backup)
 
+With `--verify`, configuration and credential checks run even when no changes were applied. Verification exits `0` when complete without critical/high findings, `1` when critical/high findings remain, and `2` if any check fails or is incomplete. Incomplete checks take precedence and are never shown as a successful verification.
+
 Auto-fixable measures:
 
 | ID | Measure | What it does |
@@ -250,6 +252,8 @@ Auto-fixable measures:
 | H009 | Tighten credential permissions | `chmod 600`/`700` or `icacls` on config dirs and credential files |
 
 All config modifications are backed up to `~/.clawlock/backups/` before changes are made.
+
+Config rollback checks each file against the exact bytes written by that action. Later edits are retained, with the journal and backup available for review. Older config journals without a written-content digest also require manual review; permission rollback remains supported.
 
 Other behavior:
 

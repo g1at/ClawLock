@@ -1,4 +1,4 @@
-"""ClawLock v2.6.0 CLI - 16 commands."""
+"""ClawLock v2.6.1 CLI - 16 commands."""
 
 import asyncio
 import concurrent.futures
@@ -172,8 +172,8 @@ _patch_cli_i18n()
 app = typer.Typer(
     name="clawlock",
     help=t(
-        "ClawLock v2.6.0 - 面向 Claw 平台的安全扫描与加固工具",
-        "ClawLock v2.6.0 - security scan and hardening for Claw platforms",
+        "ClawLock v2.6.1 - 面向 Claw 平台的安全扫描与加固工具",
+        "ClawLock v2.6.1 - security scan and hardening for Claw platforms",
     ),
     rich_markup_mode="rich",
     no_args_is_help=False,
@@ -763,7 +763,7 @@ def harden(
     verify: Annotated[
         bool,
         typer.Option(
-            "--verify", help=t("修复后自动验证", "Run verification scan after fixes")
+            "--verify", help=t("验证配置和凭证（即使未应用修改）", "Verify config and credentials, including when no changes apply")
         ),
     ] = False,
     do_rollback: Annotated[
@@ -781,6 +781,10 @@ def harden(
             console.print(f"[green]{t('已还原', 'Restored')} {n} {t('个文件', 'file(s)')}[/green]")
         else:
             console.print(f"[yellow]{t('没有可回滚的操作。', 'No actions to rollback.')}[/yellow]")
+        if verify:
+            from .hardening import verify_hardening
+
+            raise typer.Exit(verify_hardening(get_adapter(adapter).name))
         return
     scan_findings = None
     if from_scan:
@@ -790,13 +794,15 @@ def harden(
             scan_findings = history[-1]["findings"]
         else:
             scan_findings = []
-    run_hardening(
+    verification_code = run_hardening(
         get_adapter(adapter).name,
         auto=auto,
         auto_fix=auto_fix,
         from_scan=scan_findings if from_scan else None,
         verify=verify,
     )
+    if verify:
+        raise typer.Exit(verification_code)
 
 
 @app.command(help=t("运行 promptfoo 红队测试", "Run promptfoo red-team tests."))

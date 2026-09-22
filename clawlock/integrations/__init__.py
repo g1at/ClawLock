@@ -1,5 +1,5 @@
 ﻿"""
-ClawLock v2.6.0 integrations — cloud intelligence and Agent-Scan.
+ClawLock v2.6.1 integrations — cloud intelligence and Agent-Scan.
 """
 
 from __future__ import annotations
@@ -49,6 +49,23 @@ def _is_version_fixed(current: str, fixed: str) -> bool:
     return cur >= fix
 
 
+def _cve_unavailable(detail: str, *, timed_out: bool = False) -> list[Finding]:
+    return [Finding(
+        "cve",
+        INFO,
+        t("CVE 情报查询超时", "CVE intelligence query timed out") if timed_out else
+        t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"),
+        detail,
+        remediation=t("检查情报服务连接后重试。", "Check the intelligence service connection and retry."),
+        metadata={
+            "scan_status": "error",
+            "requested": True,
+            "component": "cve_intelligence",
+            "rule_id": "CVE-LOOKUP-INCOMPLETE",
+        },
+    )]
+
+
 async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Finding]:
     # Upstream /advisories 500s when called with {name=<MixedCase>, version=...}
     # but works with lowercased name, and also works when version is omitted.
@@ -67,7 +84,7 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
     try:
         data = await _fetch(base_params)
     except httpx.TimeoutException:
-        return [Finding("cve", INFO, t("CVE 情报查询超时", "CVE intelligence query timed out"), t("建议稍后重试。", "Please retry later."))]
+        return _cve_unavailable(t("建议稍后重试。", "Please retry later."), timed_out=True)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         if status >= 500 and version:
@@ -77,14 +94,22 @@ async def lookup_cve(product: str = "OpenClaw", version: str = "") -> list[Findi
                 try:
                     data = await _fetch({"name": product})
                 except Exception as e2:
-                    return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"HTTP {status}; fallback: {str(e2)[:80]}")]
+                    return _cve_unavailable(f"HTTP {status}; fallback: {type(e2).__name__}")
         else:
-            return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"HTTP {status}")]
+            return _cve_unavailable(f"HTTP {status}")
     except Exception as e:
-        return [Finding("cve", INFO, t("CVE 情报暂不可用", "CVE intelligence temporarily unavailable"), f"{str(e)[:100]}")]
-    advisories = (
-        data if isinstance(data, list) else data.get("data", data.get("advisories", []))
-    )
+        return _cve_unavailable(type(e).__name__)
+    if isinstance(data, list):
+        advisories = data
+    elif isinstance(data, dict):
+        advisories = data.get("data", data.get("advisories"))
+    else:
+        advisories = None
+    if not isinstance(advisories, list) or any(
+        not isinstance(adv, dict) or not isinstance(adv.get("info", adv), dict)
+        for adv in advisories
+    ):
+        return _cve_unavailable(t("情报响应格式无效。", "Invalid intelligence response format."))
     findings = []
     for adv in advisories:
         info = adv.get("info", adv)

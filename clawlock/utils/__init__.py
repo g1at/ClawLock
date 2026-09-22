@@ -443,14 +443,16 @@ def list_listening_ports() -> List[str]:
 # ─── File permission check (cross-platform) ──────────────────────────────────
 
 
+class PermissionCheckError(RuntimeError):
+    """Permission state could not be inspected; it is not a private-file result."""
+
+
 def check_file_permission(path: Path) -> Tuple[bool, bool, str]:
     """
     Check if a file/directory is overly permissive.
     Returns (is_world_readable, is_group_readable, human_description).
+    Raises PermissionCheckError when the requested check cannot complete.
     """
-    if not path.exists():
-        return False, False, "not found"
-
     if IS_WINDOWS:
         return _check_perm_windows(path)
     else:
@@ -465,8 +467,10 @@ def _check_perm_unix(path: Path) -> Tuple[bool, bool, str]:
         world_r = bool(mode & stat.S_IROTH)
         group_r = bool(mode & stat.S_IRGRP)
         return world_r, group_r, oct(mode)
-    except Exception:
-        return False, False, "unknown"
+    except Exception as exc:
+        raise PermissionCheckError(
+            f"Unable to read file permissions ({type(exc).__name__})."
+        ) from exc
 
 
 def _check_perm_windows(path: Path) -> Tuple[bool, bool, str]:
@@ -477,7 +481,7 @@ def _check_perm_windows(path: Path) -> Tuple[bool, bool, str]:
             timeout=10,
             max_output_bytes=1024 * 1024,
         )
-        if r.returncode == 0:
+        if r.returncode == 0 and r.stdout.strip():
             output = r.stdout.lower()
             # "everyone" or "users" with read access = world-readable
             world_r = "everyone" in output and (
@@ -489,9 +493,11 @@ def _check_perm_windows(path: Path) -> Tuple[bool, bool, str]:
             # "builtin\\users" = group-readable equivalent
             group_r = "users" in output and ("(r)" in output or "(rx)" in output)
             return world_r, group_r, r.stdout.strip()[:100]
-    except Exception:
-        pass
-    return False, False, "unknown"
+    except Exception as exc:
+        raise PermissionCheckError(
+            f"Unable to read Windows permissions ({type(exc).__name__})."
+        ) from exc
+    raise PermissionCheckError(f"Windows permission inspection failed (exit {r.returncode}).")
 
 
 def fix_file_permission(path: Path, private: bool = True) -> bool:

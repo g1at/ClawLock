@@ -11,7 +11,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.6.0"
+    version: "2.6.1"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -378,7 +378,7 @@ clawlock harden                          # Interactive
 clawlock harden --auto                   # Apply safe actions + print manual guidance
 clawlock harden --auto-fix               # Auto-fix real safe local changes
 clawlock harden --from-scan --auto-fix   # Only act on findings from the last scan
-clawlock harden --verify                 # Re-check after hardening, produce diff report
+clawlock harden --verify                 # Re-check config and credentials, report verification status
 clawlock harden --rollback               # Restore the most recent hardening action from backup
 ```
 
@@ -460,7 +460,7 @@ After applying, run:
 clawlock harden --verify
 ```
 
-`--verify` re-runs `scan_config` + `scan_credential_dirs`, compares the critical / high counts before and after, and produces a diff report. If remaining risk did not drop, explain why (common causes: file not flushed / wrong path / misspelled field name). **Never omit Step 5.**
+`--verify` re-runs `scan_config` + `scan_credential_dirs`, even when no changes were applied. It exits `0` when verification completes without critical/high findings, `1` when such findings remain, and `2` when any check fails or is incomplete. Incomplete status takes precedence and must never be interpreted as successful verification. Explain any remaining risks or incomplete checks. **Never omit Step 5.**
 
 ### Safety Constraints for LLM-Assisted Hardening
 

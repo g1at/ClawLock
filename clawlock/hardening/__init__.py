@@ -25,7 +25,7 @@ console = Console()
 
 HARDENING_LOG = Path.home() / ".clawlock" / "hardening_log.json"
 _DEFAULT_HARDENING_LOG = HARDENING_LOG
-_LOG_VERSION = 2
+_LOG_VERSION = 3
 _ACTION_ID_RE = re.compile(
     r"^[a-z0-9]+-\d{8}T\d{6}_\d{6}-[0-9a-f]{12}$"
 )
@@ -151,12 +151,16 @@ def _atomic_write_json(
     value: Any,
     *,
     expected_digest: Optional[str] = None,
+    before_replace: Optional[Callable[[str], bool]] = None,
+    after_replace: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Atomically replace *path* with validated JSON.
 
     The temporary file lives beside the destination, so ``os.replace`` remains
     atomic.  ``expected_digest`` prevents overwriting a config that changed
-    after the transaction prepared its backup.
+    after the transaction prepared its backup. Transaction callbacks persist
+    the exact replacement-byte digest before writing and a receipt afterward;
+    their failures abort the write or trigger guarded recovery at the caller.
     """
     temp_path: Optional[Path] = None
     try:
@@ -195,11 +199,18 @@ def _atomic_write_json(
         # before replacement to narrow the concurrent-update window.
         if json.loads(temp_path.read_text(encoding="utf-8")) != value:
             return False
+        written_digest = _file_digest(temp_path)
+        if written_digest is None:
+            return False
+        if before_replace is not None and not before_replace(written_digest):
+            return False
         if expected_digest is not None and _file_digest(path) != expected_digest:
             return False
 
         _replace_path(temp_path, path)
         temp_path = None
+        if after_replace is not None and not after_replace():
+            return False
         return json.loads(path.read_text(encoding="utf-8")) == value
     except Exception:
         return False
@@ -321,7 +332,7 @@ def _validate_action_record(entry: object) -> bool:
     }:
         return False
     action_id = entry.get("id")
-    if entry.get("version") != _LOG_VERSION or not isinstance(action_id, str):
+    if entry.get("version") not in {2, _LOG_VERSION} or not isinstance(action_id, str):
         return False
     if not _ACTION_ID_RE.fullmatch(action_id):
         return False
@@ -348,7 +359,10 @@ def _validate_action_record(entry: object) -> bool:
     for original, metadata in files.items():
         if not isinstance(original, str) or not _allowed_hardening_target(Path(original)):
             return False
-        if not isinstance(metadata, dict) or set(metadata) != {"backup", "digest"}:
+        expected_fields = {"backup", "digest"}
+        if entry["version"] == _LOG_VERSION:
+            expected_fields.update({"write_state", "written_digest"})
+        if not isinstance(metadata, dict) or set(metadata) != expected_fields:
             return False
         backup = metadata.get("backup")
         digest = metadata.get("digest")
@@ -358,6 +372,18 @@ def _validate_action_record(entry: object) -> bool:
             return False
         if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
             return False
+        if entry["version"] == _LOG_VERSION:
+            state = metadata.get("write_state")
+            written_digest = metadata.get("written_digest")
+            if state not in {"prepared", "writing", "written"}:
+                return False
+            if state == "prepared":
+                if written_digest is not None:
+                    return False
+            elif not isinstance(written_digest, str) or not _DIGEST_RE.fullmatch(
+                written_digest
+            ):
+                return False
 
     for original, metadata in permissions.items():
         if not isinstance(original, str) or not _allowed_hardening_target(Path(original)):
@@ -481,7 +507,7 @@ def _record_hardening_action(
     """Record an auto-fix action with backup paths for rollback."""
     action_id = action_id or _new_action_id(measure_id)
     try:
-        normalized_files: Dict[str, Dict[str, str]] = {}
+        normalized_files: Dict[str, Dict[str, object]] = {}
         for original, raw_metadata in files_changed.items():
             if isinstance(raw_metadata, dict):
                 backup = str(raw_metadata["backup"])
@@ -489,7 +515,12 @@ def _record_hardening_action(
             else:
                 backup = str(raw_metadata)
                 digest = _file_digest(Path(backup)) or ""
-            normalized_files[str(original)] = {"backup": backup, "digest": digest}
+            normalized_files[str(original)] = {
+                "backup": backup,
+                "digest": digest,
+                "write_state": "prepared",
+                "written_digest": None,
+            }
 
         normalized_permissions: Dict[str, Dict[str, object]] = {}
         for original, snapshot in (permissions_changed or {}).items():
@@ -532,6 +563,19 @@ def _set_action_status(action_id: str, status: str) -> bool:
     return False
 
 
+def _save_action_record(entry: dict) -> bool:
+    """Persist file-level progress without replacing unrelated journal entries."""
+    try:
+        log = _load_hardening_log()
+        for index, existing in enumerate(log):
+            if existing["id"] == entry["id"]:
+                log[index] = entry
+                return _save_hardening_log(log)
+    except HardeningLogError:
+        pass
+    return False
+
+
 def _get_action_record(action_id: str) -> Optional[dict]:
     try:
         for entry in reversed(_load_hardening_log()):
@@ -553,10 +597,14 @@ def _remove_action(action_id: str) -> bool:
     return _save_hardening_log(filtered)
 
 
-def _restore_file_from_backup(original: Path, backup: Path) -> bool:
+def _restore_file_from_backup(
+    original: Path, backup: Path, *, expected_current_digest: str
+) -> bool:
     temp_path: Optional[Path] = None
     try:
         if not backup.is_file() or backup.is_symlink() or original.is_symlink():
+            return False
+        if _file_digest(original) != expected_current_digest:
             return False
         expected = _file_digest(backup)
         if expected is None:
@@ -569,6 +617,9 @@ def _restore_file_from_backup(original: Path, backup: Path) -> bool:
         temp_path = Path(temp_name)
         shutil.copy2(backup, temp_path)
         if _file_digest(temp_path) != expected:
+            return False
+        # Preparing the restore must not overwrite a save made in the meantime.
+        if original.is_symlink() or _file_digest(original) != expected_current_digest:
             return False
         _replace_path(temp_path, original)
         temp_path = None
@@ -598,7 +649,30 @@ def _restore_action(entry: dict) -> Tuple[List[str], List[str]]:
         if _file_digest(backup) != expected_digest:
             failed.append(str(original))
             continue
-        if _restore_file_from_backup(Path(original), backup):
+        current_digest = _file_digest(Path(original))
+        if current_digest == expected_digest:
+            # A previous rollback may have restored this member before another
+            # member or the final journal update failed. Do not write it again.
+            if metadata.get("write_state") != "prepared":
+                restored.append(str(original))
+            continue
+        written_digest = metadata.get("written_digest")
+        if (
+            metadata.get("write_state") not in {"writing", "written"}
+            or not written_digest
+            or current_digest != written_digest
+        ):
+            # Version 2 records remain readable, but cannot establish which
+            # bytes the old transaction wrote. Keep their backups for review.
+            console.print(
+                f"  [yellow]{t('配置已变更或旧日志缺少写后摘要；保留文件与备份供核对', 'Config changed or legacy journal lacks a written digest; file and backup retained for review')}: {original}[/yellow]"
+            )
+            console.print(f"    {t('备份', 'Backup')}: {backup}")
+            failed.append(str(original))
+            continue
+        if _restore_file_from_backup(
+            Path(original), backup, expected_current_digest=written_digest
+        ):
             restored.append(str(original))
         else:
             failed.append(str(original))
@@ -787,6 +861,7 @@ def _fix_cred_perms(
 ):
     from ..utils import (
         _SYSTEM_FIX_FILE_PERMISSION,
+        PermissionCheckError,
         capture_file_permission,
         check_file_permission,
         fix_file_permission,
@@ -835,7 +910,13 @@ def _fix_cred_perms(
             if capturer is None:
                 targets.append(candidate)
             else:
-                world_r, group_r, _ = check_file_permission(candidate)
+                try:
+                    world_r, group_r, _ = check_file_permission(candidate)
+                except PermissionCheckError:
+                    _g(
+                        f"{t('无法检查凭证权限，未执行任何修改', 'Could not inspect credential permissions; no changes applied')}: {candidate}"
+                    )
+                    return False
                 if world_r or group_r:
                     targets.append(candidate)
 
@@ -1038,10 +1119,25 @@ def _apply_json_changes(
     if entry is None:
         return 0
     for change in prepared:
+        metadata = entry["files"][str(change["path"])]
+
+        def before_replace(digest: str) -> bool:
+            # Persist the intended bytes before replacement so interruption
+            # between the write and its receipt is still recoverable safely.
+            metadata["write_state"] = "writing"
+            metadata["written_digest"] = digest
+            return _save_action_record(entry)
+
+        def after_replace() -> bool:
+            metadata["write_state"] = "written"
+            return _save_action_record(entry)
+
         if not _atomic_write_json(
             change["path"],
             change["data"],
             expected_digest=change["digest"],
+            before_replace=before_replace,
+            after_replace=after_replace,
         ):
             _g(
                 f"{t('配置原子写入或校验失败，正在回滚', 'Atomic config write or validation failed; rolling back')}: {change['path']}"
@@ -1584,7 +1680,8 @@ def run_hardening(
     auto_fix: bool = False,
     from_scan: Optional[list] = None,
     verify: bool = False,
-):
+) -> Optional[int]:
+    """Run the wizard; return a verification exit code only when requested."""
     mode = (
         t("自动修复", "auto-fix")
         if auto_fix
@@ -1619,9 +1716,12 @@ def run_hardening(
             )
         else:
             console.print(
-                f"[green]{t('扫描未发现与加固措施关联的问题。', 'Scan found no issues linked to hardening measures.')}[/green]"
+                t('扫描未发现与加固措施关联的问题。', 'Scan found no issues linked to hardening measures.'),
+                style="dim" if verify else "green",
             )
-            return
+            if not verify:
+                return None
+            applicable = []
     safe_now = [m for m in applicable if not m.guidance_only and not _needs_confirmation(m)]
     recommended_only = [
         m for m in applicable if m.guidance_only and not _needs_confirmation(m)
@@ -1714,47 +1814,85 @@ def run_hardening(
     console.print(f"  {t('待确认前已跳过', 'Skipped until confirmed')}: {skipped}")
     if failed:
         console.print(f"  {t('失败', 'Failed')}: {failed}")
+    summary_title = (
+        t("加固步骤已结束，开始验证", "Hardening actions finished; starting verification")
+        if verify else t("加固完成", "Hardening complete")
+    )
     console.print(
-        f"[bold green]{t('加固完成', 'Hardening complete')}[/bold green]: "
+        f"{summary_title}: "
         f"{applied} {t('项已应用', 'applied')}, "
         f"{recommended} {t('项仅建议', 'recommended')}, "
-        f"{skipped} {t('项已跳过', 'skipped')}."
+        f"{skipped} {t('项已跳过', 'skipped')}.",
+        style="bold cyan" if verify else "bold green",
     )
 
-    # Post-fix verification: re-scan config + credentials to show improvement
-    if verify and applied > 0:
-        console.print()
-        console.print(f"[bold]{t('修复验证', 'Post-fix Verification')}[/bold]")
-        try:
-            from ..adapters import get_adapter
-            from ..scanners import CRIT, HIGH, scan_config, scan_credential_dirs
+    if verify:
+        return verify_hardening(adapter_name)
+    return None
 
-            adapter = get_adapter(adapter_name)
-            cfg_findings, _ = scan_config(adapter)
-            cred_findings = scan_credential_dirs(adapter)
-            remaining = [
-                f for f in cfg_findings + cred_findings
-                if f.level in (CRIT, HIGH)
-            ]
-            if remaining:
-                console.print(
-                    f"  [yellow]{t('仍有', 'Still')} {len(remaining)} "
-                    f"{t('个高危/严重问题待处理', 'critical/high issue(s) remaining')}[/yellow]"
-                )
-                for rf in remaining[:5]:
-                    console.print(f"    [{rf.level}] {rf.title}")
-            else:
-                console.print(
-                    f"  [green]{t('配置和凭证扫描未发现高危/严重问题。', 'Config and credential scan found no critical/high issues.')}[/green]"
-                )
-        except Exception as exc:
-            from ..scanners import _log_scanner_error
 
-            _log_scanner_error("post-fix verification", exc)
-            console.print(
-                f"  [yellow]{t('验证扫描失败', 'Verification scan failed')}: "
-                f"{type(exc).__name__}: {exc}[/yellow]"
-            )
-            console.print(
-                f"  [dim]{t('详见', 'See')} ~/.clawlock/error.log[/dim]"
-            )
+def verify_hardening(adapter_name: str) -> int:
+    """Verify both domains independently: incomplete=2, risk=1, complete=0."""
+    from ..adapters import get_adapter
+    from ..scanners import (
+        CRIT, HIGH, _scanner_error_finding, scan_config, scan_credential_dirs,
+    )
+
+    console.print()
+    console.print(f"[bold]{t('修复验证', 'Post-fix Verification')}[/bold]")
+    findings = []
+    try:
+        adapter = get_adapter(adapter_name)
+    except Exception as exc:
+        findings.append(_scanner_error_finding(t("验证适配器", "Verification adapter"), exc))
+    else:
+        checks = [
+            (t("配置", "Config"), lambda: scan_config(adapter)[0]),
+            (t("凭证", "Credentials"), lambda: scan_credential_dirs(adapter)),
+        ]
+        for label, check in checks:
+            try:
+                findings.extend(check())
+            except Exception as exc:
+                findings.append(_scanner_error_finding(label, exc))
+
+    diagnostics = []
+    remaining = []
+    for finding in findings:
+        metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
+        status = metadata.get("scan_status")
+        incomplete = (
+            finding.scanner == "internal"
+            or status in {"error", "incomplete"}
+            or (status == "skipped" and metadata.get("requested") is True)
+            or metadata.get("complete") is False
+        )
+        if incomplete:
+            diagnostics.append(finding)
+        elif finding.level in (CRIT, HIGH):
+            remaining.append(finding)
+
+    if diagnostics:
+        console.print(
+            t("验证不完整：无法确认配置与凭证检查通过。", "Verification incomplete: config and credential checks could not be confirmed."),
+            style="bold yellow",
+        )
+        for finding in diagnostics:
+            console.print(f"  {finding.title}: {finding.detail}", markup=False)
+    if remaining:
+        console.print(
+            f"  {t('仍有', 'Still')} {len(remaining)} "
+            f"{t('个高危/严重问题待处理', 'critical/high issue(s) remaining')}",
+            style="yellow",
+        )
+        for finding in remaining[:5]:
+            console.print(f"    [{finding.level}] {finding.title}", markup=False)
+    if diagnostics:
+        return 2
+    if remaining:
+        return 1
+    console.print(
+        t("配置和凭证扫描未发现高危/严重问题。", "Config and credential scan found no critical/high issues."),
+        style="green",
+    )
+    return 0

@@ -9,8 +9,11 @@ to use on untrusted text.
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import io
 import re
+import tokenize
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -308,9 +311,11 @@ class CapabilityGraph:
             return False
         lower, upper = min(lines), max(lines)
         locations = {event.location for event in path}
+        scopes = {event.metadata.get("scope") for event in path}
         return any(
             event.role == EventRole.GUARD
             and event.location in locations
+            and event.metadata.get("scope") in scopes
             and event.line is not None
             and lower <= event.line <= upper
             for event in self.events.values()
@@ -326,10 +331,29 @@ class CapabilityGraph:
         *,
         confidence_penalty: float = 0.0,
     ) -> CompositeDetection:
-        confidence = max(
-            0.0,
-            min(1.0, min(event.confidence for event in path) - confidence_penalty),
+        confidence = min(event.confidence for event in path)
+        origins = {event.metadata.get("origin", "event-graph") for event in path}
+        heuristic = "text-heuristic" in origins
+        evidence_kind = (
+            "text-heuristic" if heuristic else
+            "structured-dataflow" if origins == {"dataflow-finding"} else
+            "event-graph"
         )
+        if heuristic:
+            # Matching names and nearby operations do not establish runtime
+            # flow. Keep the candidate visible without promoting it to a
+            # confirmed high-impact chain. Structured evidence keeps its rank.
+            confidence = min(confidence, 0.6)
+            if severity in {"high", "critical"}:
+                severity = "medium"
+            detail += " Text heuristics suggest this association; data flow is unconfirmed."
+        confidence = max(0.0, min(1.0, confidence - confidence_penalty))
+        reasons = [
+            edge.reason
+            for source, sink in zip(path, path[1:])
+            for edge in self.edges
+            if edge.source_id == source.event_id and edge.target_id == sink.event_id
+        ]
         return CompositeDetection(
             rule_id=rule_id,
             title=title,
@@ -338,7 +362,11 @@ class CapabilityGraph:
             detail=detail,
             event_ids=tuple(event.event_id for event in path),
             evidence_path=tuple(path),
-            metadata={"capability_chain": [event.capability.value for event in path]},
+            metadata={
+                "capability_chain": [event.capability.value for event in path],
+                "evidence_kind": evidence_kind,
+                "correlation_reasons": reasons,
+            },
         )
 
 
@@ -465,6 +493,53 @@ def _symbols(text: str) -> Set[str]:
     }
 
 
+def _python_text_layout(
+    lines: List[str], language: str,
+) -> Tuple[Optional[List[Tuple[int, int, str]]], List[str]]:
+    """Isolate lexical scopes and ignore comments/standalone strings when parseable.
+
+    This is only a boundary for text heuristics, not a substitute for the
+    structured dataflow engine's call, binding, or control-flow analysis.
+    """
+    if language.lower() not in {"", "python", "py"}:
+        return None, lines
+    text = "\n".join(lines)
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return None, lines
+
+    scopes: List[Tuple[int, int, str]] = []
+    ignored: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            scopes.append((
+                node.lineno,
+                node.end_lineno or node.lineno,
+                f"python:{node.lineno}:{node.col_offset}:{type(node).__name__}",
+            ))
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(
+            node.value.value, str
+        ):
+            value = node.value
+            end_line = value.end_lineno or value.lineno
+            # AST columns are UTF-8 byte offsets; tokenize columns are chars.
+            start_col = len(lines[value.lineno - 1].encode("utf-8")[:value.col_offset].decode("utf-8"))
+            end_col = len(lines[end_line - 1].encode("utf-8")[:value.end_col_offset].decode("utf-8"))
+            ignored.append(((value.lineno, start_col), (end_line, end_col)))
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type == tokenize.COMMENT:
+            ignored.append((token.start, token.end))
+    cleaned = list(lines)
+    for (start_line, start_col), (end_line, end_col) in ignored:
+        for line_number in range(start_line, end_line + 1):
+            line = cleaned[line_number - 1]
+            lower = start_col if line_number == start_line else 0
+            upper = end_col if line_number == end_line else len(line)
+            cleaned[line_number - 1] = line[:lower] + " " * (upper - lower) + line[upper:]
+    return sorted(scopes, key=lambda span: (span[0], -span[1])), cleaned
+
+
 def events_from_text(
     text: str,
     *,
@@ -472,11 +547,29 @@ def events_from_text(
     language: str = "",
 ) -> CapabilityGraph:
     graph = CapabilityGraph()
-    provenance: Dict[str, Set[str]] = {}
-    location_events: List[CapabilityEvent] = []
+    raw_lines = text.splitlines()
+    line_limit = 16_384
+    truncated = [number for number, line in enumerate(raw_lines, 1) if len(line) > line_limit]
+    if truncated:
+        graph.complete = False
+        graph.diagnostics.append(
+            f"{location}: {len(truncated)} line(s) exceed the {line_limit}-character analysis limit "
+            f"(first line: {truncated[0]}); only their prefixes were inspected"
+        )
+    scope_spans, lines = _python_text_layout([line[:line_limit] for line in raw_lines], language)
+    scopes_by_start: Dict[int, List[Tuple[int, int, str]]] = {}
+    for span in scope_spans or []:
+        scopes_by_start.setdefault(span[0], []).append(span)
+    scope_stack: List[Tuple[int, int, str]] = []
+    provenance_by_scope: Dict[str, Dict[str, Set[str]]] = {}
 
-    for line_number, raw_line in enumerate(text.splitlines(), 1):
-        line = raw_line[:16_384]
+    for line_number, line in enumerate(lines, 1):
+        while scope_stack and scope_stack[-1][1] < line_number:
+            scope_stack.pop()
+        scope_stack.extend(scopes_by_start.get(line_number, []))
+        scope = scope_stack[-1][2] if scope_stack else "module"
+        provenance = provenance_by_scope.setdefault(scope, {})
+        raw_line = raw_lines[line_number - 1]
         assign_match = _ASSIGN_RE.match(line)
         assigned = assign_match.group(1) if assign_match else ""
         expression = line[assign_match.end():] if assign_match else line
@@ -490,7 +583,13 @@ def events_from_text(
             confidence: float = 0.8,
             operation: str = "",
         ) -> CapabilityEvent:
-            metadata: Dict[str, Any] = {"language": language} if language else {}
+            metadata: Dict[str, Any] = {
+                "origin": "text-heuristic",
+                "scope": scope,
+                "scope_analysis": "python-ast" if scope_spans is not None else "unresolved",
+            }
+            if language:
+                metadata["language"] = language
             if operation:
                 metadata["operation"] = operation
             produces = (assigned,) if assigned and role == EventRole.SOURCE else ()
@@ -511,7 +610,6 @@ def events_from_text(
             )
             graph.add_event(event)
             events.append(event)
-            location_events.append(event)
             return event
 
         if _UNTRUSTED_RE.search(expression) and not any(
@@ -619,6 +717,7 @@ def events_from_text(
         for persistence_event in persistence_events:
             if (
                 memory_event.location == persistence_event.location
+                and memory_event.metadata.get("scope") == persistence_event.metadata.get("scope")
                 and memory_event.line is not None
                 and persistence_event.line is not None
                 and 0 <= persistence_event.line - memory_event.line <= 50
@@ -896,7 +995,7 @@ def _has_independent_evidence(path: Sequence[CapabilityEvent]) -> bool:
     if len({event.event_id for event in path}) < 2:
         return False
     # Two different capability nodes are required. A single regex/finding can
-    # therefore never manufacture a critical chain, while an explicit compound
+    # therefore never manufacture a composite chain, while a compound
     # expression such as ``curl URL | bash`` can still provide two operations
     # on one source line.
     return len({event.capability for event in path}) >= 2
@@ -905,16 +1004,54 @@ def _has_independent_evidence(path: Sequence[CapabilityEvent]) -> bool:
 def _deduplicate_detections(
     detections: Iterable[CompositeDetection],
 ) -> List[CompositeDetection]:
+    def rank(item: CompositeDetection) -> Tuple[bool, bool, float]:
+        return (
+            item.metadata.get("evidence_kind") == "structured-dataflow",
+            item.metadata.get("evidence_kind") != "text-heuristic",
+            item.confidence,
+        )
+
+    def endpoints(item: CompositeDetection) -> Optional[Tuple[object, ...]]:
+        first = item.evidence_path[0]
+        last = item.evidence_path[-1]
+        if first.line is None or last.line is None:
+            return None
+        return (
+            item.rule_id,
+            first.location, first.line, first.capability,
+            last.location, last.line, last.capability,
+        )
+
     unique: List[CompositeDetection] = []
-    seen: Set[Tuple[str, str, str]] = set()
+    seen: Dict[Tuple[object, ...], int] = {}
     for detection in detections:
         first = detection.evidence_path[0]
         last = detection.evidence_path[-1]
+        # Distinct structured flows may share source/sink lines. Preserve
+        # their event identities and the evidence associated with each one.
         key = (detection.rule_id, first.event_id, last.event_id)
         if key not in seen:
-            seen.add(key)
+            seen[key] = len(unique)
             unique.append(detection)
-    return unique
+        else:
+            index = seen[key]
+            previous = unique[index]
+            if rank(detection) > rank(previous):
+                unique[index] = detection
+
+    structured_endpoints: Set[Tuple[object, ...]] = set()
+    for detection in unique:
+        if detection.metadata.get("evidence_kind") == "structured-dataflow":
+            endpoint_key = endpoints(detection)
+            if endpoint_key is not None:
+                structured_endpoints.add(endpoint_key)
+    # Line-level matching is only sufficient to suppress a heuristic copy;
+    # it must never collapse independently established structured flows.
+    return [
+        detection for detection in unique
+        if detection.metadata.get("evidence_kind") != "text-heuristic"
+        or endpoints(detection) not in structured_endpoints
+    ]
 
 
 __all__ = [

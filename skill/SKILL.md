@@ -10,7 +10,7 @@ description: >
   Do NOT trigger for general coding, debugging, or normal Claw usage.
 metadata:
   clawlock:
-    version: "2.6.0"
+    version: "2.6.1"
     homepage: "https://github.com/g1at/ClawLock"
     author: "g0at"
     compatible_with: [openclaw, zeroclaw, claude-code, generic-claw]
@@ -375,7 +375,7 @@ clawlock harden                          # 交互式
 clawlock harden --auto                   # 应用安全动作并输出人工指导
 clawlock harden --auto-fix               # 自动修复真正安全的本地变更
 clawlock harden --from-scan --auto-fix   # 仅处理上次 scan 报告的高危项
-clawlock harden --verify                 # 加固后重新校验、生成差异报告
+clawlock harden --verify                 # 加固后检查配置和凭证，报告验证状态
 clawlock harden --rollback               # 按备份回滚最近一次加固动作
 ```
 
@@ -457,7 +457,7 @@ clawlock harden --from-scan --auto-fix
 clawlock harden --verify
 ```
 
-`--verify` 会重新跑 `scan_config` 与 `scan_credential_dirs`，对比加固前后的 critical / high 数量并输出差异报告。如果剩余风险未下降，向用户说明原因（常见：文件未落盘 / 写到错路径 / 字段名写错），**不得将 Step 5 省略**。
+`--verify` 会重新跑 `scan_config` 与 `scan_credential_dirs`，即使本次没有应用修改也会检查。验证完整且没有 critical / high 时退出 `0`，仍有高危时退出 `1`，任一检查失败或未完整执行时退出 `2`；不完整状态优先，不能将其解释为修复通过。如果仍有风险或验证未完成，应说明原因，**不得将 Step 5 省略**。
 
 ### LLM 辅助加固的安全约束
 
